@@ -1,0 +1,44 @@
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  max-width: 42rem;
+  margin: 2.5rem auto;
+  padding: 0 1.25rem;
+  line-height: 1.6;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  line-height: 1.25;
+  margin-top: 2em;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th, td {
+  border: 1px solid currentColor;
+  padding: 0.4em 0.6em;
+  text-align: left;
+}
+
+blockquote {
+  border-left: 3px solid currentColor;
+  margin-left: 0;
+  padding-left: 1em;
+  opacity: 0.85;
+}
+
+pre {
+  overflow-x: auto;
+  padding: 0.75em 1em;
+  border-radius: 0.4em;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
