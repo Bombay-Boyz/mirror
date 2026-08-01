@@ -204,39 +204,68 @@ mkNonEmptyText t
 -- a @data:@ URI (§7 — images are embedded as base64 data URIs), but a
 -- clickable @<a href="data:text/html,...">@ is its own, separate
 -- script-injection surface most browsers will still navigate to, so
--- @data:@ is allowed for 'mkImageUrl' and refused for 'mkUrl'. A
--- scheme outside the relevant set is 'DisallowedUrlScheme', never
--- silently accepted by either.
+-- @data:@ is permitted only for 'mkImageUrl', never for 'mkUrl' — and
+-- even then, only when the data URI's own stated media type is
+-- actually an image (@data:image/png;base64,...@), not merely any
+-- @data:@ payload wearing an image-looking file extension elsewhere.
+-- A scheme (or, for @data:@, a non-image media type) outside what's
+-- permitted is 'DisallowedUrlScheme', never silently accepted.
 allowedLinkUrlSchemes :: [Text]
 allowedLinkUrlSchemes = ["http", "https", "mailto"]
 
 allowedImageUrlSchemes :: [Text]
-allowedImageUrlSchemes = ["http", "https", "data"]
+allowedImageUrlSchemes = ["http", "https"]
+-- ^ @data:@ is deliberately absent here — see 'mkImageUrl', which
+-- handles it as a distinct case with its own, additional check.
 
--- | Shared implementation: delegates syntactic validation to
--- @modern-uri@'s 'mkURI', which is total (a 'Maybe', never a partial
--- parse), so there is no hand-rolled URL grammar to get wrong — then
--- additionally restricts the result to the given allow-list. A
--- scheme-less (relative) reference has no 'URI.uriScheme' at all and
--- is accepted as-is, since a relative link or image path cannot
--- itself carry an executable scheme.
-mkUrlWith :: [Text] -> Text -> Either MirrorError Url
-mkUrlWith allowed t = do
+-- | Parses with @modern-uri@'s 'mkURI', which is total (a 'Maybe',
+-- never a partial parse), so there is no hand-rolled URL grammar to
+-- get wrong, then extracts the (lower-cased) scheme — shared by both
+-- 'mkUrl' and 'mkImageUrl' so the syntactic-validity knowledge isn't
+-- duplicated between them, even though what each does with the
+-- scheme afterwards genuinely differs.
+parseUrlScheme :: Text -> Either MirrorError (Maybe Text)
+parseUrlScheme t = do
   uri <- note (ErrValidation (InvalidUrl t)) (mkURI t)
-  case URI.unRText <$> URI.uriScheme uri of
-    Nothing -> Right (UnsafeUrl t)
-    Just scheme
-      | Text.toLower scheme `elem` allowed -> Right (UnsafeUrl t)
-      | otherwise -> Left (ErrValidation (DisallowedUrlScheme scheme))
+  pure (Text.toLower . URI.unRText <$> URI.uriScheme uri)
 
--- | For a hyperlink's destination ('Mirror.Document.Link').
+-- | For a hyperlink's destination ('Mirror.Document.Link'). A
+-- scheme-less (relative) reference has no scheme at all and is
+-- accepted as-is, since a relative link cannot itself carry an
+-- executable scheme.
 mkUrl :: Text -> Either MirrorError Url
-mkUrl = mkUrlWith allowedLinkUrlSchemes
+mkUrl t = do
+  scheme <- parseUrlScheme t
+  case scheme of
+    Nothing -> Right (UnsafeUrl t)
+    Just s
+      | s `elem` allowedLinkUrlSchemes -> Right (UnsafeUrl t)
+      | otherwise -> Left (ErrValidation (DisallowedUrlScheme s))
 
--- | For an image's @src@ ('Mirror.Document.Image'). Permits @data:@
--- in addition to 'mkUrl''s allow-list, for embedded DOCX images.
+-- | For an image's @src@ ('Mirror.Document.Image'). @data:@ is
+-- permitted, but only when 'isImageDataUri' confirms the data URI's
+-- own stated media type starts with @image/@ — narrower than simply
+-- allowing the scheme outright, so a hand-authored JSON document
+-- can't smuggle e.g. @data:text/html,...@ through an image slot.
 mkImageUrl :: Text -> Either MirrorError Url
-mkImageUrl = mkUrlWith allowedImageUrlSchemes
+mkImageUrl t = do
+  scheme <- parseUrlScheme t
+  case scheme of
+    Nothing -> Right (UnsafeUrl t)
+    Just "data"
+      | isImageDataUri t -> Right (UnsafeUrl t)
+      | otherwise -> Left (ErrValidation (DisallowedUrlScheme "data:<non-image media type>"))
+    Just s
+      | s `elem` allowedImageUrlSchemes -> Right (UnsafeUrl t)
+      | otherwise -> Left (ErrValidation (DisallowedUrlScheme s))
+
+-- | A @data:@ URI's media type (RFC 2397) is the text between the
+-- scheme's colon and the first @;@ or @,@; checking only that it
+-- starts with @image/@ is a deliberately narrow check — the only
+-- distinction 'mkImageUrl' needs to draw — not a full RFC 2397 parse.
+isImageDataUri :: Text -> Bool
+isImageDataUri t =
+  Text.isPrefixOf "image/" (Text.toLower (Text.drop 1 (snd (Text.breakOn ":" t))))
 
 mkDocument :: Maybe NonEmptyText -> [Block] -> Either MirrorError Document
 mkDocument title blocks =

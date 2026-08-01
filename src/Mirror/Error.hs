@@ -120,10 +120,14 @@ data ValidationError
   | InvalidUrl Text
     -- ^ Not a syntactically valid URI at all.
   | DisallowedUrlScheme Text
-    -- ^ A syntactically valid URI whose scheme is outside Mirror's
-    -- closed allow-list (§3) — kept distinct from 'InvalidUrl' because
-    -- "malformed" and "syntactically fine but forbidden" are different
-    -- facts a user needs to act on differently, the same distinction
+    -- ^ A syntactically valid URI whose scheme is outside the
+    -- relevant closed allow-list (§3) — 'Mirror.Document.mkUrl' (link
+    -- hrefs) and 'Mirror.Document.mkImageUrl' (image srcs) enforce
+    -- /different/ allow-lists, and this same constructor also covers
+    -- a @data:@ URI whose own stated media type isn't an image.
+    -- Kept distinct from 'InvalidUrl' because "malformed" and
+    -- "syntactically fine but forbidden" are different facts a user
+    -- needs to act on differently, the same distinction
     -- 'EmptyTable'\/'EmptyTableRow' already draws for tables.
   | InvalidLanguageTag Text
     -- ^ A code block named a fenced-code language outside Mirror's
@@ -217,7 +221,7 @@ renderValidationError = \case
   MismatchedTableColumns expected got ->
     "table row has " <> tshow got <> " columns, expected " <> tshow expected
   InvalidUrl u           -> "not a valid URL: " <> u
-  DisallowedUrlScheme s  -> "URL scheme \"" <> s <> "\" is not permitted (only http, https, mailto)"
+  DisallowedUrlScheme s  -> "URL scheme \"" <> s <> "\" is not permitted in this context"
   InvalidLanguageTag t   -> "not a recognised code-block language: " <> t
   InvalidHeadingLevel n  -> "heading level must be an integer from 1 to 6, got " <> tshow n
   EmptyLinkText          -> "a link must have non-empty visible text"

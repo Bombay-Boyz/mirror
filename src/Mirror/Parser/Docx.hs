@@ -197,19 +197,34 @@ isNamed local c = case node c of
   _             -> False
 
 --------------------------------------------------------------------------
--- Relationships (word/_rels/document.xml.rels): rId -> Target
+-- Relationships (word/_rels/document.xml.rels): rId -> target, along
+-- with whether that target is TargetMode="External" (hosted outside
+-- the archive entirely) rather than the default, archive-internal
+-- target. A hyperlink to a web URL is, in practice, always External;
+-- an /image/ relationship is ordinarily internal (embedded) but OOXML
+-- permits an External image relationship too (a picture linked to,
+-- rather than embedded from, an external URL) -- previously
+-- unhandled here, which made such an image fail with a misleading
+-- "missing part" error rather than either working or naming the
+-- actual situation.
 --------------------------------------------------------------------------
 
-parseRelationships :: BSL.ByteString -> Either MirrorError (Map Text Text)
+data DocxRelationship = DocxRelationship
+  { docxRelTarget     :: Text
+  , docxRelIsExternal :: Bool
+  } deriving (Eq, Show)
+
+parseRelationships :: BSL.ByteString -> Either MirrorError (Map Text DocxRelationship)
 parseRelationships bytes = do
   xmlDoc <- parseXmlPart "word/_rels/document.xml.rels" bytes
   let relCursors = fromDocument xmlDoc $// element (packageRelNs "Relationship")
-  pure (Map.fromList (mapMaybe extractPair relCursors))
+  pure (Map.fromList (mapMaybe extractRelationship relCursors))
   where
-    extractPair c = do
+    extractRelationship c = do
       rid    <- listToMaybe (unqualifiedAttr "Id" c)
       target <- listToMaybe (unqualifiedAttr "Target" c)
-      pure (rid, target)
+      let isExternal = listToMaybe (unqualifiedAttr "TargetMode" c) == Just "External"
+      pure (rid, DocxRelationship target isExternal)
 
 --------------------------------------------------------------------------
 -- Numbering (word/numbering.xml): numId -> "ordered" | "unordered",
@@ -250,7 +265,7 @@ parseNumberingFormats bytes = do
 maxEmbeddedImages :: Int
 maxEmbeddedImages = 500
 
-loadImageDataUris :: FilePath -> Archive -> Map Text Text -> Cursor -> ExceptT MirrorError IO (Map Text Text)
+loadImageDataUris :: FilePath -> Archive -> Map Text DocxRelationship -> Cursor -> ExceptT MirrorError IO (Map Text Text)
 loadImageDataUris archivePath archive rels docCursor = do
   let rids = Set.toList (Set.fromList (mapMaybe (listToMaybe . attribute (officeRelNs "embed")) (docCursor $// element (drawingMainNs "blip"))))
   () <- ExceptT (pure (if length rids > maxEmbeddedImages
@@ -259,15 +274,26 @@ loadImageDataUris archivePath archive rels docCursor = do
   pairs <- traverse (\rid -> (,) rid <$> loadOneImageDataUri archivePath archive rels rid) rids
   pure (Map.fromList pairs)
 
-loadOneImageDataUri :: FilePath -> Archive -> Map Text Text -> Text -> ExceptT MirrorError IO Text
+-- | An External relationship (§9) is a picture linked to, rather than
+-- embedded from, a URL outside the archive: no zip access, no MIME
+-- sniffing, no base64 -- the target URL itself becomes the image's
+-- @src@ (validated the same as any other image source, by
+-- 'Mirror.Document.mkImageUrl', downstream in "Mirror.Document.Raw").
+-- An Internal relationship keeps the original embedded-image path:
+-- resolve to a zip part, read it, and base64-encode it as a
+-- self-contained @data:@ URI.
+loadOneImageDataUri :: FilePath -> Archive -> Map Text DocxRelationship -> Text -> ExceptT MirrorError IO Text
 loadOneImageDataUri archivePath archive rels rid = do
-  target     <- ExceptT (pure (maybe (Left (ErrParse (DocxUnresolvedRelationship rid))) Right (Map.lookup rid rels)))
-  mimeType   <- ExceptT (pure (mimeTypeFromExtension target))
-  let partName = resolveMediaTarget target
-  maybeBytes <- loadPart archivePath archive partName
-  bytes      <- ExceptT (pure (maybe (Left (ErrParse (DocxMissingPart partName))) Right maybeBytes))
-  let base64Text = TE.decodeUtf8 (Base64.encode (BSL.toStrict bytes))
-  pure ("data:" <> mimeType <> ";base64," <> base64Text)
+  rel <- ExceptT (pure (maybe (Left (ErrParse (DocxUnresolvedRelationship rid))) Right (Map.lookup rid rels)))
+  if docxRelIsExternal rel
+    then pure (docxRelTarget rel)
+    else do
+      mimeType   <- ExceptT (pure (mimeTypeFromExtension (docxRelTarget rel)))
+      let partName = resolveMediaTarget (docxRelTarget rel)
+      maybeBytes <- loadPart archivePath archive partName
+      bytes      <- ExceptT (pure (maybe (Left (ErrParse (DocxMissingPart partName))) Right maybeBytes))
+      let base64Text = TE.decodeUtf8 (Base64.encode (BSL.toStrict bytes))
+      pure ("data:" <> mimeType <> ";base64," <> base64Text)
 
 -- | A relationship target is conventionally relative to the
 -- referencing part's own directory (@word\/@, for anything reached
@@ -295,7 +321,7 @@ mimeTypeFromExtension partName =
 -- into one block quote — the same classify-and-group shape §6 uses.
 --------------------------------------------------------------------------
 
-bodyBlocksFromCursors :: Map Text Text -> Map Text Text -> Map Text Text -> [Cursor] -> Either MirrorError [RawBlock]
+bodyBlocksFromCursors :: Map Text Text -> Map Text DocxRelationship -> Map Text Text -> [Cursor] -> Either MirrorError [RawBlock]
 bodyBlocksFromCursors imageData rels numFmts = go
   where
     go [] = Right []
@@ -372,7 +398,7 @@ paragraphIsStandaloneDrawing p = case paragraphDrawing p of
   Nothing -> False
   Just _  -> Text.null (Text.concat (p $// element (wordNs "t") &/ content))
 
-paragraphToRawBlock :: Map Text Text -> Map Text Text -> Cursor -> Either MirrorError RawBlock
+paragraphToRawBlock :: Map Text Text -> Map Text DocxRelationship -> Cursor -> Either MirrorError RawBlock
 paragraphToRawBlock imageData rels p
   | hasBottomBorder p
   = Right RawHorizontalRule
@@ -427,19 +453,19 @@ extentDimensions drawingCursor = do
 -- signal one.
 --------------------------------------------------------------------------
 
-tableToRawBlock :: Map Text Text -> Cursor -> Either MirrorError RawBlock
+tableToRawBlock :: Map Text DocxRelationship -> Cursor -> Either MirrorError RawBlock
 tableToRawBlock rels tblCursor = do
   rows <- traverse (rowToRawRow rels) (tblCursor $/ element (wordNs "tr"))
   pure (RawTable Nothing rows)
 
-rowToRawRow :: Map Text Text -> Cursor -> Either MirrorError RawRow
+rowToRawRow :: Map Text DocxRelationship -> Cursor -> Either MirrorError RawRow
 rowToRawRow rels rowCursor = traverse (cellToRawCell rels) (rowCursor $/ element (wordNs "tc"))
 
 -- | A cell's paragraphs (a table cell may contain more than one) are
 -- joined with a soft break: 'RawCell' is a single inline-content slot
 -- ('[RawInline]'), not a sequence of blocks, the same representation
 -- every other source's table cells use (§3, §8).
-cellToRawCell :: Map Text Text -> Cursor -> Either MirrorError RawCell
+cellToRawCell :: Map Text DocxRelationship -> Cursor -> Either MirrorError RawCell
 cellToRawCell rels cellCursor = do
   inlineLists <- traverse (paragraphRawInlines rels) (cellCursor $/ element (wordNs "p"))
   pure (intercalateSoftBreak inlineLists)
@@ -456,20 +482,20 @@ intercalateSoftBreak (x : xs) = x ++ [RawSoftBreak] ++ intercalateSoftBreak xs
 -- own runs' inlines in a RawLink.
 --------------------------------------------------------------------------
 
-paragraphRawInlines :: Map Text Text -> Cursor -> Either MirrorError [RawInline]
+paragraphRawInlines :: Map Text DocxRelationship -> Cursor -> Either MirrorError [RawInline]
 paragraphRawInlines rels p = concat <$> traverse (childToRawInlines rels) (p $/ checkName isInlineChild)
   where
     isInlineChild n = n == wordNs "r" || n == wordNs "hyperlink"
 
-childToRawInlines :: Map Text Text -> Cursor -> Either MirrorError [RawInline]
+childToRawInlines :: Map Text DocxRelationship -> Cursor -> Either MirrorError [RawInline]
 childToRawInlines rels c
   | isNamed "hyperlink" c
   = do
       rid        <- maybe (Left (ErrParse (DocxMalformedXml "word/document.xml" "w:hyperlink missing r:id"))) Right
                       (listToMaybe (attribute (officeRelNs "id") c))
-      target     <- maybe (Left (ErrParse (DocxUnresolvedRelationship rid))) Right (Map.lookup rid rels)
+      rel        <- maybe (Left (ErrParse (DocxUnresolvedRelationship rid))) Right (Map.lookup rid rels)
       runInlines <- concat <$> traverse runToRawInlines (c $/ element (wordNs "r"))
-      pure [RawLink target runInlines]
+      pure [RawLink (docxRelTarget rel) runInlines]
 
   | isNamed "r" c
   = runToRawInlines c

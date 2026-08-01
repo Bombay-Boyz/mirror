@@ -1,0 +1,359 @@
+diff --git a/src/Mirror/Document.hs b/src/Mirror/Document.hs
+index c60e015..96828a1 100644
+--- a/src/Mirror/Document.hs
++++ b/src/Mirror/Document.hs
+@@ -204,39 +204,68 @@ mkNonEmptyText t
+ -- a @data:@ URI (§7 — images are embedded as base64 data URIs), but a
+ -- clickable @<a href="data:text/html,...">@ is its own, separate
+ -- script-injection surface most browsers will still navigate to, so
+--- @data:@ is allowed for 'mkImageUrl' and refused for 'mkUrl'. A
+--- scheme outside the relevant set is 'DisallowedUrlScheme', never
+--- silently accepted by either.
++-- @data:@ is permitted only for 'mkImageUrl', never for 'mkUrl' — and
++-- even then, only when the data URI's own stated media type is
++-- actually an image (@data:image/png;base64,...@), not merely any
++-- @data:@ payload wearing an image-looking file extension elsewhere.
++-- A scheme (or, for @data:@, a non-image media type) outside what's
++-- permitted is 'DisallowedUrlScheme', never silently accepted.
+ allowedLinkUrlSchemes :: [Text]
+ allowedLinkUrlSchemes = ["http", "https", "mailto"]
+ 
+ allowedImageUrlSchemes :: [Text]
+-allowedImageUrlSchemes = ["http", "https", "data"]
+-
+--- | Shared implementation: delegates syntactic validation to
+--- @modern-uri@'s 'mkURI', which is total (a 'Maybe', never a partial
+--- parse), so there is no hand-rolled URL grammar to get wrong — then
+--- additionally restricts the result to the given allow-list. A
+--- scheme-less (relative) reference has no 'URI.uriScheme' at all and
+--- is accepted as-is, since a relative link or image path cannot
+--- itself carry an executable scheme.
+-mkUrlWith :: [Text] -> Text -> Either MirrorError Url
+-mkUrlWith allowed t = do
++allowedImageUrlSchemes = ["http", "https"]
++-- ^ @data:@ is deliberately absent here — see 'mkImageUrl', which
++-- handles it as a distinct case with its own, additional check.
++
++-- | Parses with @modern-uri@'s 'mkURI', which is total (a 'Maybe',
++-- never a partial parse), so there is no hand-rolled URL grammar to
++-- get wrong, then extracts the (lower-cased) scheme — shared by both
++-- 'mkUrl' and 'mkImageUrl' so the syntactic-validity knowledge isn't
++-- duplicated between them, even though what each does with the
++-- scheme afterwards genuinely differs.
++parseUrlScheme :: Text -> Either MirrorError (Maybe Text)
++parseUrlScheme t = do
+   uri <- note (ErrValidation (InvalidUrl t)) (mkURI t)
+-  case URI.unRText <$> URI.uriScheme uri of
+-    Nothing -> Right (UnsafeUrl t)
+-    Just scheme
+-      | Text.toLower scheme `elem` allowed -> Right (UnsafeUrl t)
+-      | otherwise -> Left (ErrValidation (DisallowedUrlScheme scheme))
++  pure (Text.toLower . URI.unRText <$> URI.uriScheme uri)
+ 
+--- | For a hyperlink's destination ('Mirror.Document.Link').
++-- | For a hyperlink's destination ('Mirror.Document.Link'). A
++-- scheme-less (relative) reference has no scheme at all and is
++-- accepted as-is, since a relative link cannot itself carry an
++-- executable scheme.
+ mkUrl :: Text -> Either MirrorError Url
+-mkUrl = mkUrlWith allowedLinkUrlSchemes
+-
+--- | For an image's @src@ ('Mirror.Document.Image'). Permits @data:@
+--- in addition to 'mkUrl''s allow-list, for embedded DOCX images.
++mkUrl t = do
++  scheme <- parseUrlScheme t
++  case scheme of
++    Nothing -> Right (UnsafeUrl t)
++    Just s
++      | s `elem` allowedLinkUrlSchemes -> Right (UnsafeUrl t)
++      | otherwise -> Left (ErrValidation (DisallowedUrlScheme s))
++
++-- | For an image's @src@ ('Mirror.Document.Image'). @data:@ is
++-- permitted, but only when 'isImageDataUri' confirms the data URI's
++-- own stated media type starts with @image/@ — narrower than simply
++-- allowing the scheme outright, so a hand-authored JSON document
++-- can't smuggle e.g. @data:text/html,...@ through an image slot.
+ mkImageUrl :: Text -> Either MirrorError Url
+-mkImageUrl = mkUrlWith allowedImageUrlSchemes
++mkImageUrl t = do
++  scheme <- parseUrlScheme t
++  case scheme of
++    Nothing -> Right (UnsafeUrl t)
++    Just "data"
++      | isImageDataUri t -> Right (UnsafeUrl t)
++      | otherwise -> Left (ErrValidation (DisallowedUrlScheme "data:<non-image media type>"))
++    Just s
++      | s `elem` allowedImageUrlSchemes -> Right (UnsafeUrl t)
++      | otherwise -> Left (ErrValidation (DisallowedUrlScheme s))
++
++-- | A @data:@ URI's media type (RFC 2397) is the text between the
++-- scheme's colon and the first @;@ or @,@; checking only that it
++-- starts with @image/@ is a deliberately narrow check — the only
++-- distinction 'mkImageUrl' needs to draw — not a full RFC 2397 parse.
++isImageDataUri :: Text -> Bool
++isImageDataUri t =
++  Text.isPrefixOf "image/" (Text.toLower (Text.drop 1 (snd (Text.breakOn ":" t))))
+ 
+ mkDocument :: Maybe NonEmptyText -> [Block] -> Either MirrorError Document
+ mkDocument title blocks =
+diff --git a/src/Mirror/Error.hs b/src/Mirror/Error.hs
+index 05d85a1..6f948fa 100644
+--- a/src/Mirror/Error.hs
++++ b/src/Mirror/Error.hs
+@@ -120,10 +120,14 @@ data ValidationError
+   | InvalidUrl Text
+     -- ^ Not a syntactically valid URI at all.
+   | DisallowedUrlScheme Text
+-    -- ^ A syntactically valid URI whose scheme is outside Mirror's
+-    -- closed allow-list (§3) — kept distinct from 'InvalidUrl' because
+-    -- "malformed" and "syntactically fine but forbidden" are different
+-    -- facts a user needs to act on differently, the same distinction
++    -- ^ A syntactically valid URI whose scheme is outside the
++    -- relevant closed allow-list (§3) — 'Mirror.Document.mkUrl' (link
++    -- hrefs) and 'Mirror.Document.mkImageUrl' (image srcs) enforce
++    -- /different/ allow-lists, and this same constructor also covers
++    -- a @data:@ URI whose own stated media type isn't an image.
++    -- Kept distinct from 'InvalidUrl' because "malformed" and
++    -- "syntactically fine but forbidden" are different facts a user
++    -- needs to act on differently, the same distinction
+     -- 'EmptyTable'\/'EmptyTableRow' already draws for tables.
+   | InvalidLanguageTag Text
+     -- ^ A code block named a fenced-code language outside Mirror's
+@@ -217,7 +221,7 @@ renderValidationError = \case
+   MismatchedTableColumns expected got ->
+     "table row has " <> tshow got <> " columns, expected " <> tshow expected
+   InvalidUrl u           -> "not a valid URL: " <> u
+-  DisallowedUrlScheme s  -> "URL scheme \"" <> s <> "\" is not permitted (only http, https, mailto)"
++  DisallowedUrlScheme s  -> "URL scheme \"" <> s <> "\" is not permitted in this context"
+   InvalidLanguageTag t   -> "not a recognised code-block language: " <> t
+   InvalidHeadingLevel n  -> "heading level must be an integer from 1 to 6, got " <> tshow n
+   EmptyLinkText          -> "a link must have non-empty visible text"
+diff --git a/src/Mirror/Parser/Docx.hs b/src/Mirror/Parser/Docx.hs
+index b5b28ca..fbfedcc 100644
+--- a/src/Mirror/Parser/Docx.hs
++++ b/src/Mirror/Parser/Docx.hs
+@@ -197,19 +197,34 @@ isNamed local c = case node c of
+   _             -> False
+ 
+ --------------------------------------------------------------------------
+--- Relationships (word/_rels/document.xml.rels): rId -> Target
++-- Relationships (word/_rels/document.xml.rels): rId -> target, along
++-- with whether that target is TargetMode="External" (hosted outside
++-- the archive entirely) rather than the default, archive-internal
++-- target. A hyperlink to a web URL is, in practice, always External;
++-- an /image/ relationship is ordinarily internal (embedded) but OOXML
++-- permits an External image relationship too (a picture linked to,
++-- rather than embedded from, an external URL) -- previously
++-- unhandled here, which made such an image fail with a misleading
++-- "missing part" error rather than either working or naming the
++-- actual situation.
+ --------------------------------------------------------------------------
+ 
+-parseRelationships :: BSL.ByteString -> Either MirrorError (Map Text Text)
++data DocxRelationship = DocxRelationship
++  { docxRelTarget     :: Text
++  , docxRelIsExternal :: Bool
++  } deriving (Eq, Show)
++
++parseRelationships :: BSL.ByteString -> Either MirrorError (Map Text DocxRelationship)
+ parseRelationships bytes = do
+   xmlDoc <- parseXmlPart "word/_rels/document.xml.rels" bytes
+   let relCursors = fromDocument xmlDoc $// element (packageRelNs "Relationship")
+-  pure (Map.fromList (mapMaybe extractPair relCursors))
++  pure (Map.fromList (mapMaybe extractRelationship relCursors))
+   where
+-    extractPair c = do
++    extractRelationship c = do
+       rid    <- listToMaybe (unqualifiedAttr "Id" c)
+       target <- listToMaybe (unqualifiedAttr "Target" c)
+-      pure (rid, target)
++      let isExternal = listToMaybe (unqualifiedAttr "TargetMode" c) == Just "External"
++      pure (rid, DocxRelationship target isExternal)
+ 
+ --------------------------------------------------------------------------
+ -- Numbering (word/numbering.xml): numId -> "ordered" | "unordered",
+@@ -250,7 +265,7 @@ parseNumberingFormats bytes = do
+ maxEmbeddedImages :: Int
+ maxEmbeddedImages = 500
+ 
+-loadImageDataUris :: FilePath -> Archive -> Map Text Text -> Cursor -> ExceptT MirrorError IO (Map Text Text)
++loadImageDataUris :: FilePath -> Archive -> Map Text DocxRelationship -> Cursor -> ExceptT MirrorError IO (Map Text Text)
+ loadImageDataUris archivePath archive rels docCursor = do
+   let rids = Set.toList (Set.fromList (mapMaybe (listToMaybe . attribute (officeRelNs "embed")) (docCursor $// element (drawingMainNs "blip"))))
+   () <- ExceptT (pure (if length rids > maxEmbeddedImages
+@@ -259,15 +274,26 @@ loadImageDataUris archivePath archive rels docCursor = do
+   pairs <- traverse (\rid -> (,) rid <$> loadOneImageDataUri archivePath archive rels rid) rids
+   pure (Map.fromList pairs)
+ 
+-loadOneImageDataUri :: FilePath -> Archive -> Map Text Text -> Text -> ExceptT MirrorError IO Text
++-- | An External relationship (§9) is a picture linked to, rather than
++-- embedded from, a URL outside the archive: no zip access, no MIME
++-- sniffing, no base64 -- the target URL itself becomes the image's
++-- @src@ (validated the same as any other image source, by
++-- 'Mirror.Document.mkImageUrl', downstream in "Mirror.Document.Raw").
++-- An Internal relationship keeps the original embedded-image path:
++-- resolve to a zip part, read it, and base64-encode it as a
++-- self-contained @data:@ URI.
++loadOneImageDataUri :: FilePath -> Archive -> Map Text DocxRelationship -> Text -> ExceptT MirrorError IO Text
+ loadOneImageDataUri archivePath archive rels rid = do
+-  target     <- ExceptT (pure (maybe (Left (ErrParse (DocxUnresolvedRelationship rid))) Right (Map.lookup rid rels)))
+-  mimeType   <- ExceptT (pure (mimeTypeFromExtension target))
+-  let partName = resolveMediaTarget target
+-  maybeBytes <- loadPart archivePath archive partName
+-  bytes      <- ExceptT (pure (maybe (Left (ErrParse (DocxMissingPart partName))) Right maybeBytes))
+-  let base64Text = TE.decodeUtf8 (Base64.encode (BSL.toStrict bytes))
+-  pure ("data:" <> mimeType <> ";base64," <> base64Text)
++  rel <- ExceptT (pure (maybe (Left (ErrParse (DocxUnresolvedRelationship rid))) Right (Map.lookup rid rels)))
++  if docxRelIsExternal rel
++    then pure (docxRelTarget rel)
++    else do
++      mimeType   <- ExceptT (pure (mimeTypeFromExtension (docxRelTarget rel)))
++      let partName = resolveMediaTarget (docxRelTarget rel)
++      maybeBytes <- loadPart archivePath archive partName
++      bytes      <- ExceptT (pure (maybe (Left (ErrParse (DocxMissingPart partName))) Right maybeBytes))
++      let base64Text = TE.decodeUtf8 (Base64.encode (BSL.toStrict bytes))
++      pure ("data:" <> mimeType <> ";base64," <> base64Text)
+ 
+ -- | A relationship target is conventionally relative to the
+ -- referencing part's own directory (@word\/@, for anything reached
+@@ -295,7 +321,7 @@ mimeTypeFromExtension partName =
+ -- into one block quote — the same classify-and-group shape §6 uses.
+ --------------------------------------------------------------------------
+ 
+-bodyBlocksFromCursors :: Map Text Text -> Map Text Text -> Map Text Text -> [Cursor] -> Either MirrorError [RawBlock]
++bodyBlocksFromCursors :: Map Text Text -> Map Text DocxRelationship -> Map Text Text -> [Cursor] -> Either MirrorError [RawBlock]
+ bodyBlocksFromCursors imageData rels numFmts = go
+   where
+     go [] = Right []
+@@ -372,7 +398,7 @@ paragraphIsStandaloneDrawing p = case paragraphDrawing p of
+   Nothing -> False
+   Just _  -> Text.null (Text.concat (p $// element (wordNs "t") &/ content))
+ 
+-paragraphToRawBlock :: Map Text Text -> Map Text Text -> Cursor -> Either MirrorError RawBlock
++paragraphToRawBlock :: Map Text Text -> Map Text DocxRelationship -> Cursor -> Either MirrorError RawBlock
+ paragraphToRawBlock imageData rels p
+   | hasBottomBorder p
+   = Right RawHorizontalRule
+@@ -427,19 +453,19 @@ extentDimensions drawingCursor = do
+ -- signal one.
+ --------------------------------------------------------------------------
+ 
+-tableToRawBlock :: Map Text Text -> Cursor -> Either MirrorError RawBlock
++tableToRawBlock :: Map Text DocxRelationship -> Cursor -> Either MirrorError RawBlock
+ tableToRawBlock rels tblCursor = do
+   rows <- traverse (rowToRawRow rels) (tblCursor $/ element (wordNs "tr"))
+   pure (RawTable Nothing rows)
+ 
+-rowToRawRow :: Map Text Text -> Cursor -> Either MirrorError RawRow
++rowToRawRow :: Map Text DocxRelationship -> Cursor -> Either MirrorError RawRow
+ rowToRawRow rels rowCursor = traverse (cellToRawCell rels) (rowCursor $/ element (wordNs "tc"))
+ 
+ -- | A cell's paragraphs (a table cell may contain more than one) are
+ -- joined with a soft break: 'RawCell' is a single inline-content slot
+ -- ('[RawInline]'), not a sequence of blocks, the same representation
+ -- every other source's table cells use (§3, §8).
+-cellToRawCell :: Map Text Text -> Cursor -> Either MirrorError RawCell
++cellToRawCell :: Map Text DocxRelationship -> Cursor -> Either MirrorError RawCell
+ cellToRawCell rels cellCursor = do
+   inlineLists <- traverse (paragraphRawInlines rels) (cellCursor $/ element (wordNs "p"))
+   pure (intercalateSoftBreak inlineLists)
+@@ -456,20 +482,20 @@ intercalateSoftBreak (x : xs) = x ++ [RawSoftBreak] ++ intercalateSoftBreak xs
+ -- own runs' inlines in a RawLink.
+ --------------------------------------------------------------------------
+ 
+-paragraphRawInlines :: Map Text Text -> Cursor -> Either MirrorError [RawInline]
++paragraphRawInlines :: Map Text DocxRelationship -> Cursor -> Either MirrorError [RawInline]
+ paragraphRawInlines rels p = concat <$> traverse (childToRawInlines rels) (p $/ checkName isInlineChild)
+   where
+     isInlineChild n = n == wordNs "r" || n == wordNs "hyperlink"
+ 
+-childToRawInlines :: Map Text Text -> Cursor -> Either MirrorError [RawInline]
++childToRawInlines :: Map Text DocxRelationship -> Cursor -> Either MirrorError [RawInline]
+ childToRawInlines rels c
+   | isNamed "hyperlink" c
+   = do
+       rid        <- maybe (Left (ErrParse (DocxMalformedXml "word/document.xml" "w:hyperlink missing r:id"))) Right
+                       (listToMaybe (attribute (officeRelNs "id") c))
+-      target     <- maybe (Left (ErrParse (DocxUnresolvedRelationship rid))) Right (Map.lookup rid rels)
++      rel        <- maybe (Left (ErrParse (DocxUnresolvedRelationship rid))) Right (Map.lookup rid rels)
+       runInlines <- concat <$> traverse runToRawInlines (c $/ element (wordNs "r"))
+-      pure [RawLink target runInlines]
++      pure [RawLink (docxRelTarget rel) runInlines]
+ 
+   | isNamed "r" c
+   = runToRawInlines c
+diff --git a/test/Spec.hs b/test/Spec.hs
+index 9a1268f..2ea9199 100644
+--- a/test/Spec.hs
++++ b/test/Spec.hs
+@@ -54,6 +54,25 @@ documentSpec = describe "Mirror.Document smart constructors" $ do
+   it "rejects a syntactically invalid URL" $
+     mkUrl "not a url with raw spaces" `shouldSatisfy` isInvalidUrl
+ 
++  it "REGRESSION: mkUrl refuses a javascript: link, closing the XSS vector" $
++    mkUrl "javascript:alert(1)" `shouldSatisfy` isDisallowedUrlScheme
++
++  it "REGRESSION: mkUrl refuses a data: link (even an image one) -- links and images have different allow-lists" $
++    mkUrl "data:image/png;base64,aGVsbG8=" `shouldSatisfy` isDisallowedUrlScheme
++
++  it "REGRESSION: mkImageUrl accepts a data: URI whose media type is genuinely an image" $
++    mkImageUrl "data:image/png;base64,aGVsbG8=" `shouldSatisfy` isRight
++
++  it "REGRESSION: mkImageUrl refuses a data: URI whose media type is not an image" $
++    mkImageUrl "data:text/html,<script>alert(1)</script>" `shouldSatisfy` isDisallowedUrlScheme
++
++  it "REGRESSION: mkImageUrl refuses a javascript: image src just as mkUrl does" $
++    mkImageUrl "javascript:alert(1)" `shouldSatisfy` isDisallowedUrlScheme
++
++  it "accepts a mailto: link but mkImageUrl refuses it -- mailto has no meaning as an image src" $ do
++    mkUrl "mailto:a@example.com" `shouldSatisfy` isRight
++    mkImageUrl "mailto:a@example.com" `shouldSatisfy` isDisallowedUrlScheme
++
+   it "maps exactly the range 1..6 to a HeadingLevel" $ do
+     map headingLevelFromInt [1 .. 6] `shouldBe` map Just [H1, H2, H3, H4, H5, H6]
+     headingLevelFromInt 0 `shouldBe` Nothing
+@@ -77,6 +96,10 @@ isInvalidUrl :: Either MirrorError a -> Bool
+ isInvalidUrl (Left (ErrValidation (InvalidUrl _))) = True
+ isInvalidUrl _                                     = False
+ 
++isDisallowedUrlScheme :: Either MirrorError a -> Bool
++isDisallowedUrlScheme (Left (ErrValidation (DisallowedUrlScheme _))) = True
++isDisallowedUrlScheme _                                              = False
++
+ isRight :: Either a b -> Bool
+ isRight (Right _) = True
+ isRight (Left _)  = False
+@@ -411,6 +434,16 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
+       (drawingPara "rId5" "x")))
+     result `shouldBe` Left (ErrParse (DocxUnsupportedImageFormat "tiff"))
+ 
++  it "REGRESSION: resolves an External image relationship to its target URL directly, without touching the zip archive" $ do
++    -- Deliberately no "word/media/..." part in the archive at all: if
++    -- this were (incorrectly) treated as an internal relationship, it
++    -- would fail with DocxMissingPart rather than succeed.
++    result <- runExceptT (parseDocx "t.docx" (docxRich
++      [("word/_rels/document.xml.rels", externalImageRelsXml "rId5" "https://ex.com/linked.png")]
++      (drawingPara "rId5" "a linked cat")))
++    result `shouldBe` mkDocument Nothing
++      [Image (imageUrl "https://ex.com/linked.png") "a linked cat" Nothing]
++
+ --------------------------------------------------------------------------
+ -- DOCX test builders
+ --------------------------------------------------------------------------
+@@ -443,6 +476,16 @@ relsXml pairs =
+     <> concat [ "<Relationship Id=\"" <> i <> "\" Target=\"" <> t <> "\"/>" | (i, t) <- pairs ]
+     <> "</Relationships>"
+ 
++-- | A single relationship marked @TargetMode="External"@ -- the
++-- OOXML signal that 'Target' is a URL outside the archive entirely,
++-- not a path to an internal zip part.
++externalImageRelsXml :: String -> String -> String
++externalImageRelsXml rid targetUrl =
++  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
++  \<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
++  \<Relationship Id=\"" <> rid <> "\" Target=\"" <> targetUrl <> "\" TargetMode=\"External\"/>\
++  \</Relationships>"
++
+ -- | A numbering.xml mapping numId 1 -> abstractNumId 0, whose level-0
+ -- format is the given numFmt val ("bullet" or e.g. "decimal").
+ numberingXml :: String -> String

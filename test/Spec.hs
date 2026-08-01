@@ -54,6 +54,25 @@ documentSpec = describe "Mirror.Document smart constructors" $ do
   it "rejects a syntactically invalid URL" $
     mkUrl "not a url with raw spaces" `shouldSatisfy` isInvalidUrl
 
+  it "REGRESSION: mkUrl refuses a javascript: link, closing the XSS vector" $
+    mkUrl "javascript:alert(1)" `shouldSatisfy` isDisallowedUrlScheme
+
+  it "REGRESSION: mkUrl refuses a data: link (even an image one) -- links and images have different allow-lists" $
+    mkUrl "data:image/png;base64,aGVsbG8=" `shouldSatisfy` isDisallowedUrlScheme
+
+  it "REGRESSION: mkImageUrl accepts a data: URI whose media type is genuinely an image" $
+    mkImageUrl "data:image/png;base64,aGVsbG8=" `shouldSatisfy` isRight
+
+  it "REGRESSION: mkImageUrl refuses a data: URI whose media type is not an image" $
+    mkImageUrl "data:text/plain,hello" `shouldSatisfy` isDisallowedUrlScheme
+
+  it "REGRESSION: mkImageUrl refuses a javascript: image src just as mkUrl does" $
+    mkImageUrl "javascript:alert(1)" `shouldSatisfy` isDisallowedUrlScheme
+
+  it "accepts a mailto: link but mkImageUrl refuses it -- mailto has no meaning as an image src" $ do
+    mkUrl "mailto:a@example.com" `shouldSatisfy` isRight
+    mkImageUrl "mailto:a@example.com" `shouldSatisfy` isDisallowedUrlScheme
+
   it "maps exactly the range 1..6 to a HeadingLevel" $ do
     map headingLevelFromInt [1 .. 6] `shouldBe` map Just [H1, H2, H3, H4, H5, H6]
     headingLevelFromInt 0 `shouldBe` Nothing
@@ -76,6 +95,10 @@ documentSpec = describe "Mirror.Document smart constructors" $ do
 isInvalidUrl :: Either MirrorError a -> Bool
 isInvalidUrl (Left (ErrValidation (InvalidUrl _))) = True
 isInvalidUrl _                                     = False
+
+isDisallowedUrlScheme :: Either MirrorError a -> Bool
+isDisallowedUrlScheme (Left (ErrValidation (DisallowedUrlScheme _))) = True
+isDisallowedUrlScheme _                                              = False
 
 isRight :: Either a b -> Bool
 isRight (Right _) = True
@@ -411,6 +434,16 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
       (drawingPara "rId5" "x")))
     result `shouldBe` Left (ErrParse (DocxUnsupportedImageFormat "tiff"))
 
+  it "REGRESSION: resolves an External image relationship to its target URL directly, without touching the zip archive" $ do
+    -- Deliberately no "word/media/..." part in the archive at all: if
+    -- this were (incorrectly) treated as an internal relationship, it
+    -- would fail with DocxMissingPart rather than succeed.
+    result <- runExceptT (parseDocx "t.docx" (docxRich
+      [("word/_rels/document.xml.rels", externalImageRelsXml "rId5" "https://ex.com/linked.png")]
+      (drawingPara "rId5" "a linked cat")))
+    result `shouldBe` mkDocument Nothing
+      [Image (imageUrl "https://ex.com/linked.png") "a linked cat" Nothing]
+
 --------------------------------------------------------------------------
 -- DOCX test builders
 --------------------------------------------------------------------------
@@ -442,6 +475,16 @@ relsXml pairs =
   \<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">"
     <> concat [ "<Relationship Id=\"" <> i <> "\" Target=\"" <> t <> "\"/>" | (i, t) <- pairs ]
     <> "</Relationships>"
+
+-- | A single relationship marked @TargetMode="External"@ -- the
+-- OOXML signal that 'Target' is a URL outside the archive entirely,
+-- not a path to an internal zip part.
+externalImageRelsXml :: String -> String -> String
+externalImageRelsXml rid targetUrl =
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+  \<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+  \<Relationship Id=\"" <> rid <> "\" Target=\"" <> targetUrl <> "\" TargetMode=\"External\"/>\
+  \</Relationships>"
 
 -- | A numbering.xml mapping numId 1 -> abstractNumId 0, whose level-0
 -- format is the given numFmt val ("bullet" or e.g. "decimal").
