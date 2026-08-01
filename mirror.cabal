@@ -11,6 +11,9 @@ common warnings
     -Wincomplete-record-updates
     -Wmissing-export-lists
     -Wunused-imports
+    -Wunused-top-binds
+    -Wunused-local-binds
+    -Wunused-matches
     -Wredundant-constraints
     -Wpartial-fields
     -Widentities

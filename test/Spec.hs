@@ -15,11 +15,13 @@ import Mirror.Html
 import Mirror.Parser.Docx (parseDocx)
 import Mirror.Parser.Json (parseJson)
 import Mirror.Parser.Markdown (parseMarkdown)
+import Mirror.Renderer.Html (renderDocument)
 
 main :: IO ()
 main = hspec $ do
   documentSpec
   htmlSpec
+  rendererSpec
   markdownSpec
   docxSpec
   jsonSpec
@@ -41,11 +43,11 @@ documentSpec = describe "Mirror.Document smart constructors" $ do
     mkTable Nothing [[]] `shouldBe` Left (ErrValidation EmptyTableRow)
 
   it "reports a ragged table with the canonical and offending widths" $
-    mkTable Nothing [[[Text "a"]], [[Text "b"], [Text "c"]]]
+    mkTable Nothing [[[Plain "a"]], [[Plain "b"], [Plain "c"]]]
       `shouldBe` Left (ErrValidation (MismatchedTableColumns 1 2))
 
   it "accepts a rectangular table and reports its column count" $
-    case mkTable (Just [[Text "H"]]) [[[Text "a"]]] of
+    case mkTable (Just [[Plain "H"]]) [[[Plain "a"]]] of
       Right (TableBlock t) -> tableColumnCount t `shouldBe` 1
       other                -> expectationFailure ("expected a table, got " <> show other)
 
@@ -59,7 +61,7 @@ documentSpec = describe "Mirror.Document smart constructors" $ do
 
   prop "any positive number of equal-width rows forms a valid table of that width" $
     \(Positive width) (Positive rowCount) ->
-      let row = replicate width [Text "x"]
+      let row = replicate width [Plain "x"]
       in case mkTable Nothing (replicate rowCount row) of
            Right (TableBlock t) -> tableColumnCount t == width
            _                    -> False
@@ -67,7 +69,7 @@ documentSpec = describe "Mirror.Document smart constructors" $ do
   prop "two rows of differing widths are always rejected as ragged, never accepted" $
     \(Positive w1) (Positive w2) ->
       w1 /= w2 ==>
-        case mkTable Nothing [replicate w1 [Text "x"], replicate w2 [Text "x"]] of
+        case mkTable Nothing [replicate w1 [Plain "x"], replicate w2 [Plain "x"]] of
           Left (ErrValidation (MismatchedTableColumns _ _)) -> True
           _                                                 -> False
 
@@ -96,6 +98,75 @@ htmlSpec = describe "Mirror.Html escaping" $ do
     Text.all (`notElem` ("<>\"'" :: String)) (renderHtml (escape (Text.pack s)))
 
 --------------------------------------------------------------------------
+-- Mirror.Renderer.Html: previously zero coverage at all -- in
+-- particular the one invariant this module's own Haddock claims
+-- (bounded nesting fails cleanly rather than exhausting the stack)
+-- had never been exercised by a test.
+--------------------------------------------------------------------------
+
+rendererSpec :: Spec
+rendererSpec = describe "Mirror.Renderer.Html" $ do
+  it "renders the document title as both <title> and the page's single <h1>" $ do
+    let doc = either (error . show) id
+          (mkDocument (Just (either (error . show) id (mkNonEmptyText "My Title")))
+                      [Paragraph [Plain "body text"]])
+    case renderDocument "style.css" doc of
+      Left e     -> expectationFailure ("expected a render, got " <> show e)
+      Right html -> do
+        html `shouldSatisfy` Text.isInfixOf "<title>My Title</title>"
+        html `shouldSatisfy` Text.isInfixOf "<h1>My Title</h1>"
+
+  it "emits charset, viewport, lang, a skip link, and a single main landmark" $ do
+    let doc = either (error . show) id (mkDocument Nothing [Paragraph [Plain "x"]])
+    case renderDocument "style.css" doc of
+      Left e     -> expectationFailure ("expected a render, got " <> show e)
+      Right html -> do
+        html `shouldSatisfy` Text.isInfixOf "charset=\"UTF-8\""
+        html `shouldSatisfy` Text.isInfixOf "name=\"viewport\""
+        html `shouldSatisfy` Text.isInfixOf "<html lang=\"en\">"
+        html `shouldSatisfy` Text.isInfixOf "class=\"skip-link\""
+        html `shouldSatisfy` Text.isInfixOf "<main id=\"main\">"
+
+  it "emits width/height/loading on an image with known dimensions" $ do
+    let doc = either (error . show) id
+          (mkDocument Nothing [Image (imageUrl "https://ex.com/c.png") "a cat" (Just (400, 300))])
+    case renderDocument "style.css" doc of
+      Left e     -> expectationFailure ("expected a render, got " <> show e)
+      Right html -> do
+        html `shouldSatisfy` Text.isInfixOf "width=\"400\""
+        html `shouldSatisfy` Text.isInfixOf "height=\"300\""
+        html `shouldSatisfy` Text.isInfixOf "loading=\"lazy\""
+
+  it "omits width/height, but still emits loading=lazy, when dimensions are unknown" $ do
+    let doc = either (error . show) id
+          (mkDocument Nothing [Image (imageUrl "https://ex.com/c.png") "a cat" Nothing])
+    case renderDocument "style.css" doc of
+      Left e     -> expectationFailure ("expected a render, got " <> show e)
+      Right html -> do
+        html `shouldSatisfy` Text.isInfixOf "loading=\"lazy\""
+        html `shouldNotSatisfy` Text.isInfixOf "width=\""
+
+  it "renders a table header cell with scope=\"col\"" $ do
+    let doc = either (error . show) id
+          (mkDocument Nothing [tableOrError (Just [[Plain "H"]]) [[[Plain "a"]]]])
+    case renderDocument "style.css" doc of
+      Left e     -> expectationFailure ("expected a render, got " <> show e)
+      Right html -> html `shouldSatisfy` Text.isInfixOf "<th scope=\"col\">"
+
+  it "REGRESSION: fails cleanly with UnrenderableNestingDepth on adversarially deep nesting, rather than crashing" $ do
+    let doc = either (error . show) id (mkDocument Nothing [nestBlockQuote 200 (Paragraph [Plain "x"])])
+    case renderDocument "style.css" doc of
+      Left (ErrRender (UnrenderableNestingDepth _)) -> pure ()
+      other -> expectationFailure ("expected UnrenderableNestingDepth, got " <> show other)
+
+-- | Wraps a block in @n@ nested 'BlockQuote's around a single leaf --
+-- structurally recursive on a decreasing 'Int', so this is total
+-- without reaching for the banned, partial '(!!)'.
+nestBlockQuote :: Int -> Block -> Block
+nestBlockQuote 0 leaf = leaf
+nestBlockQuote n leaf = BlockQuote (nestBlockQuote (n - 1) leaf :| [])
+
+--------------------------------------------------------------------------
 -- Mirror.Parser.Markdown
 --------------------------------------------------------------------------
 
@@ -104,43 +175,43 @@ markdownSpec = describe "Mirror.Parser.Markdown" $ do
   it "REGRESSION: joins a wrapped paragraph's lines with SoftBreak, not one <p> per line" $
     parseMarkdown "This is a paragraph\nthat spans two lines."
       `shouldBe` mkDocument Nothing
-        [Paragraph [Text "This is a paragraph", SoftBreak, Text "that spans two lines."]]
+        [Paragraph [Plain "This is a paragraph", SoftBreak, Plain "that spans two lines."]]
 
   it "keeps a blank-line-separated paragraph as its own block" $
     parseMarkdown "First.\n\nSecond."
-      `shouldBe` mkDocument Nothing [Paragraph [Text "First."], Paragraph [Text "Second."]]
+      `shouldBe` mkDocument Nothing [Paragraph [Plain "First."], Paragraph [Plain "Second."]]
 
   it "recognises heading levels 1 and 6" $
     parseMarkdown "# One\n\n###### Six"
-      `shouldBe` mkDocument Nothing [Heading H1 [Text "One"], Heading H6 [Text "Six"]]
+      `shouldBe` mkDocument Nothing [Heading H1 [Plain "One"], Heading H6 [Plain "Six"]]
 
   it "treats seven or more hashes as an ordinary paragraph, not a rejected document" $
     parseMarkdown "####### not a heading"
-      `shouldBe` mkDocument Nothing [Paragraph [Text "####### not a heading"]]
+      `shouldBe` mkDocument Nothing [Paragraph [Plain "####### not a heading"]]
 
   it "collapses multiple consecutive blank lines to a single separator" $
-    parseMarkdown "A.\n\n\n\nB." `shouldBe` mkDocument Nothing [Paragraph [Text "A."], Paragraph [Text "B."]]
+    parseMarkdown "A.\n\n\n\nB." `shouldBe` mkDocument Nothing [Paragraph [Plain "A."], Paragraph [Plain "B."]]
 
   it "rejects an all-blank document" $
     parseMarkdown "   \n\n  " `shouldBe` Left (ErrValidation EmptyDocumentBody)
 
   it "a heading immediately followed by a paragraph, with no blank line, still splits into two blocks" $
     parseMarkdown "# Title\nBody text right after"
-      `shouldBe` mkDocument Nothing [Heading H1 [Text "Title"], Paragraph [Text "Body text right after"]]
+      `shouldBe` mkDocument Nothing [Heading H1 [Plain "Title"], Paragraph [Plain "Body text right after"]]
 
   it "normalises CRLF line endings before joining or splitting" $
     parseMarkdown "Line one\r\nLine two\r\n\r\nSecond para\r\n"
       `shouldBe` mkDocument Nothing
-        [ Paragraph [Text "Line one", SoftBreak, Text "Line two"]
-        , Paragraph [Text "Second para"]
+        [ Paragraph [Plain "Line one", SoftBreak, Plain "Line two"]
+        , Paragraph [Plain "Second para"]
         ]
 
   -- Inline syntax (the Megaparsec inline layer, §6)
   it "parses **strong** emphasis" $
-    parseMarkdown "**bold**" `shouldBe` mkDocument Nothing [Paragraph [Strong [Text "bold"]]]
+    parseMarkdown "**bold**" `shouldBe` mkDocument Nothing [Paragraph [Strong [Plain "bold"]]]
 
   it "parses *emphasis*" $
-    parseMarkdown "*italic*" `shouldBe` mkDocument Nothing [Paragraph [Emphasis [Text "italic"]]]
+    parseMarkdown "*italic*" `shouldBe` mkDocument Nothing [Paragraph [Emphasis [Plain "italic"]]]
 
   it "parses a `code span`" $
     parseMarkdown "`x = 1`" `shouldBe` mkDocument Nothing [Paragraph [InlineCode "x = 1"]]
@@ -148,17 +219,17 @@ markdownSpec = describe "Mirror.Parser.Markdown" $ do
   it "parses a [text](url) link, recursing on the link text" $
     parseMarkdown "[**A**](https://anthropic.com)"
       `shouldBe` mkDocument Nothing
-        [Paragraph [Link (url "https://anthropic.com") [Strong [Text "A"]]]]
+        [Paragraph [Link (url "https://anthropic.com") (Strong [Plain "A"] :| [])]]
 
   it "TRAP: an inner * must not steal from an outer ** closing marker" $
     parseMarkdown "**text*more**"
-      `shouldBe` mkDocument Nothing [Paragraph [Strong [Text "text*more"]]]
+      `shouldBe` mkDocument Nothing [Paragraph [Strong [Plain "text*more"]]]
 
   it "shields a code span's contents from emphasis interpretation" $
     parseMarkdown "`a*b*c`" `shouldBe` mkDocument Nothing [Paragraph [InlineCode "a*b*c"]]
 
   it "treats an escaped \\* as a literal asterisk, not a delimiter" $
-    parseMarkdown "a\\*b" `shouldBe` mkDocument Nothing [Paragraph [Text "a*b"]]
+    parseMarkdown "a\\*b" `shouldBe` mkDocument Nothing [Paragraph [Plain "a*b"]]
 
   it "reports InvalidUrl for a link whose URL is not a valid URI" $
     parseMarkdown "[bad](not a url)" `shouldSatisfy` isInvalidUrl
@@ -168,22 +239,22 @@ markdownSpec = describe "Mirror.Parser.Markdown" $ do
     parseMarkdown "- one\n- two"
       `shouldBe` mkDocument Nothing
         [ BulletList Unordered
-            ( ListItem [Paragraph [Text "one"]]
-                :| [ListItem [Paragraph [Text "two"]]] )
+            ( ListItem [Paragraph [Plain "one"]]
+                :| [ListItem [Paragraph [Plain "two"]]] )
         ]
 
   it "recognises an ordered list from N. markers" $
     parseMarkdown "1. first\n2. second"
       `shouldBe` mkDocument Nothing
         [ BulletList Ordered
-            ( ListItem [Paragraph [Text "first"]]
-                :| [ListItem [Paragraph [Text "second"]]] )
+            ( ListItem [Paragraph [Plain "first"]]
+                :| [ListItem [Paragraph [Plain "second"]]] )
         ]
 
   it "unwraps a > blockquote and parses its contents recursively" $
     parseMarkdown "> quoted **bold**"
       `shouldBe` mkDocument Nothing
-        [BlockQuote (Paragraph [Text "quoted ", Strong [Text "bold"]] :| [])]
+        [BlockQuote (Paragraph [Plain "quoted ", Strong [Plain "bold"]] :| [])]
 
   it "parses a fenced code block, preserving its body verbatim" $
     parseMarkdown "```haskell\nf x = x\n```"
@@ -197,8 +268,8 @@ markdownSpec = describe "Mirror.Parser.Markdown" $ do
     parseMarkdown "| A | B |\n| - | - |\n| 1 | 2 |"
       `shouldBe` mkDocument Nothing
         [ tableOrError
-            (Just [[Text "A"], [Text "B"]])
-            [[[Text "1"], [Text "2"]]]
+            (Just [[Plain "A"], [Plain "B"]])
+            [[[Plain "1"], [Plain "2"]]]
         ]
 
   it "reports MismatchedTableColumns for a ragged pipe table -- the shared validation" $
@@ -208,11 +279,15 @@ markdownSpec = describe "Mirror.Parser.Markdown" $ do
   it "recognises a --- thematic break as a horizontal rule" $
     parseMarkdown "above\n\n---\n\nbelow"
       `shouldBe` mkDocument Nothing
-        [Paragraph [Text "above"], HorizontalRule, Paragraph [Text "below"]]
+        [Paragraph [Plain "above"], HorizontalRule, Paragraph [Plain "below"]]
 
   it "recognises a standalone image line" $
     parseMarkdown "![a cat](https://ex.com/c.png)"
-      `shouldBe` mkDocument Nothing [Image (url "https://ex.com/c.png") "a cat"]
+      `shouldBe` mkDocument Nothing [Image (imageUrl "https://ex.com/c.png") "a cat" Nothing]
+
+  it "REGRESSION: a long run of paired emphasis delimiters parses to completion without crashing" $
+    let manyPairs = Text.concat (replicate 2000 "*x*")
+    in parseMarkdown manyPairs `shouldSatisfy` isRight
 
 --------------------------------------------------------------------------
 -- Mirror.Parser.Docx
@@ -223,18 +298,18 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
   it "REGRESSION: resolves a Heading1-styled paragraph's level from w:pStyle/@w:val" $ do
     result <- runExceptT (parseDocx "t.docx" (docxBytes
       "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>"))
-    result `shouldBe` mkDocument Nothing [Heading H1 [Text "Title"]]
+    result `shouldBe` mkDocument Nothing [Heading H1 [Plain "Title"]]
 
   it "REGRESSION: an empty paragraph renders as an empty block, not a rejected document" $ do
     result <- runExceptT (parseDocx "t.docx" (docxBytes
       "<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After</w:t></w:r></w:p>"))
     result `shouldBe` mkDocument Nothing
-      [Paragraph [Text "Before"], Paragraph [], Paragraph [Text "After"]]
+      [Paragraph [Plain "Before"], Paragraph [], Paragraph [Plain "After"]]
 
   it "honours an explicit w:val=\"0\" as turning bold off despite w:b being present" $ do
     result <- runExceptT (parseDocx "t.docx" (docxBytes
       "<w:p><w:r><w:rPr><w:b w:val=\"0\"/></w:rPr><w:t>plain</w:t></w:r></w:p>"))
-    result `shouldBe` mkDocument Nothing [Paragraph [Text "plain"]]
+    result `shouldBe` mkDocument Nothing [Paragraph [Plain "plain"]]
 
   -- Hyperlinks (r:id resolved through document.xml.rels)
   it "resolves a w:hyperlink through the relationships part into a Link" $ do
@@ -242,7 +317,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
       [("word/_rels/document.xml.rels", relsXml [("rId1", "https://anthropic.com")])]
       "<w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>click</w:t></w:r></w:hyperlink></w:p>"))
     result `shouldBe` mkDocument Nothing
-      [Paragraph [Link (url "https://anthropic.com") [Text "click"]]]
+      [Paragraph [Link (url "https://anthropic.com") (Plain "click" :| [])]]
 
   it "reports DocxUnresolvedRelationship for a hyperlink whose r:id is not in the rels" $ do
     result <- runExceptT (parseDocx "t.docx" (docxRich []
@@ -259,7 +334,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
   it "turns a w:br inside a run into a SoftBreak" $ do
     result <- runExceptT (parseDocx "t.docx" (docxRich []
       "<w:p><w:r><w:t>a</w:t><w:br/><w:t>b</w:t></w:r></w:p>"))
-    result `shouldBe` mkDocument Nothing [Paragraph [Text "a", SoftBreak, Text "b"]]
+    result `shouldBe` mkDocument Nothing [Paragraph [Plain "a", SoftBreak, Plain "b"]]
 
   -- Horizontal rule (bottom paragraph border, Word's --- autoformat)
   it "recognises a paragraph bottom border as a HorizontalRule" $ do
@@ -273,7 +348,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
       (  "<w:p><w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr><w:r><w:t>one</w:t></w:r></w:p>"
       <> "<w:p><w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr><w:r><w:t>two</w:t></w:r></w:p>")))
     result `shouldBe` mkDocument Nothing
-      [BlockQuote (Paragraph [Text "one"] :| [Paragraph [Text "two"]])]
+      [BlockQuote (Paragraph [Plain "one"] :| [Paragraph [Plain "two"]])]
 
   -- Tables (w:tbl / w:tr / w:tc), never a header row
   it "parses a w:tbl into a header-less TableBlock" $ do
@@ -283,7 +358,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
       <> "<w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc>"
       <> "</w:tr></w:tbl>")))
     result `shouldBe` mkDocument Nothing
-      [tableOrError Nothing [[[Text "A"], [Text "B"]]]]
+      [tableOrError Nothing [[[Plain "A"], [Plain "B"]]]]
 
   it "reports MismatchedTableColumns for a ragged w:tbl -- the shared validation" $ do
     result <- runExceptT (parseDocx "t.docx" (docxRich []
@@ -302,8 +377,8 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
       <> numberedPara "1" "two")))
     result `shouldBe` mkDocument Nothing
       [ BulletList Unordered
-          ( ListItem [Paragraph [Text "one"]]
-              :| [ListItem [Paragraph [Text "two"]]] )
+          ( ListItem [Paragraph [Plain "one"]]
+              :| [ListItem [Paragraph [Plain "two"]]] )
       ]
 
   it "resolves a decimal numFmt to an ordered list" $ do
@@ -311,7 +386,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
       [("word/numbering.xml", numberingXml "decimal")]
       (numberedPara "1" "only")))
     result `shouldBe` mkDocument Nothing
-      [BulletList Ordered (ListItem [Paragraph [Text "only"]] :| [])]
+      [BulletList Ordered (ListItem [Paragraph [Plain "only"]] :| [])]
 
   it "reports DocxUnresolvedNumbering when a numId has no numbering.xml entry" $ do
     result <- runExceptT (parseDocx "t.docx" (docxRich []
@@ -326,7 +401,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
       ]
       (drawingPara "rId5" "a cat")))
     result `shouldBe` mkDocument Nothing
-      [Image (url "data:image/png;base64,aGVsbG8=") "a cat"]
+      [Image (imageUrl "data:image/png;base64,aGVsbG8=") "a cat" Nothing]
 
   it "reports DocxUnsupportedImageFormat for an unrecognised media extension" $ do
     result <- runExceptT (parseDocx "t.docx" (docxRich
@@ -391,6 +466,9 @@ drawingPara embedId alt =
 url :: Text.Text -> Url
 url t = either (error . show) id (mkUrl t)
 
+imageUrl :: Text.Text -> Url
+imageUrl t = either (error . show) id (mkImageUrl t)
+
 languageTag :: Text.Text -> LanguageTag
 languageTag t = maybe (error ("bad language tag: " <> show t)) id (languageTagFromText t)
 
@@ -406,7 +484,7 @@ jsonSpec = describe "Mirror.Parser.Json" $ do
   it "round-trips a heading" $
     parseJson (BSLC.pack
       "{\"blocks\":[{\"type\":\"heading\",\"level\":2,\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}]}")
-      `shouldBe` mkDocument Nothing [Heading H2 [Text "Hi"]]
+      `shouldBe` mkDocument Nothing [Heading H2 [Plain "Hi"]]
 
   it "reports MismatchedTableColumns for a ragged table -- the same error any source gets" $
     parseJson (BSLC.pack
@@ -419,9 +497,9 @@ jsonSpec = describe "Mirror.Parser.Json" $ do
   it "reports JsonSchemaViolation for an unrecognised block type" $
     parseJson (BSLC.pack "{\"blocks\":[{\"type\":\"bogus\"}]}") `shouldSatisfy` isSchemaViolation
 
-  it "reports JsonSchemaViolation for a heading level outside 1..6" $
+  it "reports InvalidHeadingLevel for a heading level outside 1..6" $
     parseJson (BSLC.pack "{\"blocks\":[{\"type\":\"heading\",\"level\":9,\"content\":[]}]}")
-      `shouldSatisfy` isSchemaViolation
+      `shouldSatisfy` isInvalidHeadingLevel
 
   it "reports JsonSyntax for input that isn't well-formed JSON at all" $
     parseJson (BSLC.pack "{not json") `shouldSatisfy` isJsonSyntaxError
@@ -453,9 +531,30 @@ jsonSpec = describe "Mirror.Parser.Json" $ do
       "{\"blocks\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"link\",\"href\":\"not a url\",\"content\":[]}]}]}")
       `shouldSatisfy` isInvalidUrl
 
+  it "REGRESSION: rejects a document nested far past the depth ceiling with ExcessiveNestingDepth, rather than exhausting the stack" $
+    parseJson (BSLC.pack (Text.unpack ("{\"blocks\":[" <> nestedBlockquoteJson 200 <> "]}")))
+      `shouldSatisfy` isExcessiveNestingDepth
+
+-- | A JSON blockquote nested @n@ levels deep around a single empty
+-- paragraph -- built here, deterministically, by direct string
+-- construction (not by relying on any parser's own backtracking
+-- behaviour), so this test's depth is exactly known rather than
+-- inferred from delimiter-matching semantics.
+nestedBlockquoteJson :: Int -> Text.Text
+nestedBlockquoteJson 0 = "{\"type\":\"paragraph\",\"content\":[]}"
+nestedBlockquoteJson n = "{\"type\":\"blockquote\",\"content\":[" <> nestedBlockquoteJson (n - 1) <> "]}"
+
+isExcessiveNestingDepth :: Either MirrorError a -> Bool
+isExcessiveNestingDepth (Left (ErrParse (ExcessiveNestingDepth _))) = True
+isExcessiveNestingDepth _                                           = False
+
 isInvalidLanguageTag :: Either MirrorError a -> Bool
 isInvalidLanguageTag (Left (ErrValidation (InvalidLanguageTag _))) = True
 isInvalidLanguageTag _                                            = False
+
+isInvalidHeadingLevel :: Either MirrorError a -> Bool
+isInvalidHeadingLevel (Left (ErrValidation (InvalidHeadingLevel _))) = True
+isInvalidHeadingLevel _                                              = False
 
 isSchemaViolation :: Either MirrorError a -> Bool
 isSchemaViolation (Left (ErrParse (JsonSchemaViolation _))) = True

@@ -1,18 +1,68 @@
+/* ==========================================================================
+   1. SETTINGS — design tokens. No visible output from this layer alone.
+   ========================================================================== */
 :root {
   color-scheme: light dark;
+
+  --color-text: #1a1a1a;
+  --color-bg: #ffffff;
+  --color-border: currentColor;
+  --color-link: #0b5fff;
+
+  --space-1: 0.4em;
+  --space-2: 0.6em;
+  --space-3: 1em;
+  --space-4: 1.25rem;
+  --space-5: 2.5rem;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --line-height-body: 1.6;
+  --line-height-heading: 1.25;
+
+  --radius-sm: 0.4em;
+
+  --measure: 42rem;
+
+  --bp-tablet: 48rem; /* 768px */
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-text: #f2f2f2;
+    --color-bg: #121212;
+    --color-link: #7aa7ff;
+  }
+}
+
+/* ==========================================================================
+   2. GENERIC — minimal reset.
+   ========================================================================== */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+/* ==========================================================================
+   3. ELEMENTS — bare HTML element defaults.
+   ========================================================================== */
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  max-width: 42rem;
-  margin: 2.5rem auto;
-  padding: 0 1.25rem;
-  line-height: 1.6;
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  background: var(--color-bg);
+  max-width: var(--measure);
+  margin: var(--space-5) auto;
+  padding: 0 var(--space-4);
+  line-height: var(--line-height-body);
 }
 
 h1, h2, h3, h4, h5, h6 {
-  line-height: 1.25;
+  line-height: var(--line-height-heading);
   margin-top: 2em;
+}
+
+a {
+  color: var(--color-link);
 }
 
 table {
@@ -21,24 +71,68 @@ table {
 }
 
 th, td {
-  border: 1px solid currentColor;
-  padding: 0.4em 0.6em;
+  border: 1px solid var(--color-border);
+  padding: var(--space-1) var(--space-2);
   text-align: left;
 }
 
 blockquote {
-  border-left: 3px solid currentColor;
+  border-left: 3px solid var(--color-border);
   margin-left: 0;
-  padding-left: 1em;
+  padding-left: var(--space-3);
   opacity: 0.85;
 }
 
 pre {
   overflow-x: auto;
-  padding: 0.75em 1em;
-  border-radius: 0.4em;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
 }
 
 code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
+}
+
+img, video, iframe {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ==========================================================================
+   6. UTILITIES — single-purpose overrides.
+   ========================================================================== */
+
+/* Visually hidden until focused, per web-engineering-standard §1.10: the
+   first focusable element on the page, so keyboard users can bypass
+   whatever body content precedes <main>. */
+.skip-link {
+  position: absolute;
+  top: -3em;
+  left: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-bg);
+  color: var(--color-text);
+  z-index: 100;
+}
+
+.skip-link:focus {
+  top: 0;
+}
+
+/* ==========================================================================
+   User preferences — respected unconditionally, not opt-in (§2.8).
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  .skip-link {
+    display: none;
+  }
 }

@@ -59,7 +59,7 @@ import Mirror.Parser.Markdown.Inline (inlinesFromSubstring)
 -- table) — the same checks every other source is held to (§3).
 parseMarkdown :: Text -> Either MirrorError Document
 parseMarkdown src = do
-  blocks <- traverse toBlock (blocksFromLines (toLines src))
+  blocks <- traverse (toBlock 0) (blocksFromLines (toLines src))
   mkDocument Nothing blocks
 
 toLines :: Text -> [Text]
@@ -224,7 +224,7 @@ blocksFromLines (l : ls)
   = RawHeading levelInt (inlinesFromSubstring titleText) : blocksFromLines ls
 
   | Just (url, alt) <- imageLine l
-  = RawImage url alt : blocksFromLines ls
+  = RawImage url alt Nothing : blocksFromLines ls
 
   | Just firstUnwrapped <- blockQuotePrefix l
   = let (quoteLines, rest) = spanBlockQuote ls

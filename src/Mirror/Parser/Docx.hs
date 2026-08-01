@@ -55,14 +55,15 @@ import Control.Exception (SomeException, evaluate, try)
 import Control.Monad.Trans.Except (ExceptT (..))
 import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as BSL
-import Data.List (nub)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TE
-import Codec.Archive.Zip (Archive, findEntryByPath, fromEntry, toArchive)
+import Text.Read (readMaybe)
+import Codec.Archive.Zip (Archive, Entry, eUncompressedSize, findEntryByPath, fromEntry, toArchive)
 import qualified Text.XML as XML
 import Text.XML (Node (NodeElement), Name (..), def, elementName, parseLBS)
 import Text.XML.Cursor
@@ -130,24 +131,50 @@ parseDocx path raw = do
   numFmts     <- ExceptT (pure (maybe (Right Map.empty) parseNumberingFormats numBytes))
   imageData   <- loadImageDataUris path archive rels docCursor
   rawBlocks   <- ExceptT (pure (bodyBlocksFromCursors imageData rels numFmts (bodyChildCursors docCursor)))
-  finalBlocks <- ExceptT (pure (traverse toBlock rawBlocks))
+  finalBlocks <- ExceptT (pure (traverse (toBlock 0) rawBlocks))
   ExceptT (pure (mkDocument Nothing finalBlocks))
+
+-- | A small, crafted zip entry can expand to an arbitrarily large
+-- amount of memory on decompression (a "zip bomb"). @zip-archive@
+-- exposes each entry's /declared/ uncompressed size without
+-- decompressing it, so that size is checked — and rejected, named,
+-- before any decompression happens — rather than assumed trustworthy.
+-- The limit is generous for any legitimate document part (the largest
+-- realistic @document.xml@ or embedded image) while still bounding
+-- worst-case memory use to a known, small multiple of this figure.
+maxDecompressedPartBytes :: Integer
+maxDecompressedPartBytes = 64 * 1024 * 1024 -- 64 MiB, per part
 
 -- | Extracts one zip entry's bytes if present, forcing full
 -- evaluation (via 'BSL.length') at the point of extraction — exactly
 -- where a corrupt archive's decompression failure would throw —
 -- rather than leaving that force to happen lazily on some later,
--- unrelated line.
+-- unrelated line. The entry's declared size is checked, and rejected
+-- as 'DocxPartTooLarge', strictly before that decompressing force.
 loadPart :: FilePath -> Archive -> Text -> ExceptT MirrorError IO (Maybe BSL.ByteString)
-loadPart archivePath archive partName = ExceptT $ do
-  outcome <- try (evaluate forced)
-  pure $ case (outcome :: Either SomeException (Maybe BSL.ByteString)) of
-    Left _        -> Left (ErrParse (DocxNotAZipArchive archivePath))
-    Right maybeBs -> Right maybeBs
+loadPart archivePath archive partName =
+  case findEntryByPath (Text.unpack partName) archive of
+    Nothing -> ExceptT (pure (Right Nothing))
+    Just e
+      | declaredSize e > maxDecompressedPartBytes ->
+          ExceptT (pure (Left (ErrParse (DocxPartTooLarge partName (declaredSize e) maxDecompressedPartBytes))))
+      | otherwise -> ExceptT $ do
+          outcome <- try (evaluate (forced e))
+          pure $ case (outcome :: Either SomeException BSL.ByteString) of
+            Left _   -> Left (ErrParse (DocxNotAZipArchive archivePath))
+            Right bs -> Right (Just bs)
   where
-    forced = case findEntryByPath (Text.unpack partName) archive of
-      Nothing -> Nothing
-      Just e  -> let bytes = fromEntry e in BSL.length bytes `seq` Just bytes
+    -- 'eUncompressedSize''s exact numeric type is an internal
+    -- @zip-archive@ detail that has varied across versions ('Word32'
+    -- in most current releases); converted explicitly via
+    -- 'fromIntegral' rather than assumed to unify directly with
+    -- 'Integer', so this comparison is robust to whichever the pinned
+    -- version actually uses.
+    declaredSize :: Entry -> Integer
+    declaredSize = fromIntegral . eUncompressedSize
+
+    forced :: Entry -> BSL.ByteString
+    forced e = let bytes = fromEntry e in BSL.length bytes `seq` bytes
 
 requirePart :: FilePath -> Archive -> Text -> ExceptT MirrorError IO BSL.ByteString
 requirePart archivePath archive partName = do
@@ -216,9 +243,19 @@ parseNumberingFormats bytes = do
 -- pure map access instead of touching the zip archive again.
 --------------------------------------------------------------------------
 
+-- | Bounds the number of distinct embedded images a single document
+-- may reference — each one is fully base64-encoded into memory
+-- (§7), so an unbounded count is itself a resource-exhaustion vector
+-- independent of any single part's size.
+maxEmbeddedImages :: Int
+maxEmbeddedImages = 500
+
 loadImageDataUris :: FilePath -> Archive -> Map Text Text -> Cursor -> ExceptT MirrorError IO (Map Text Text)
 loadImageDataUris archivePath archive rels docCursor = do
-  let rids = nub (mapMaybe (listToMaybe . attribute (officeRelNs "embed")) (docCursor $// element (drawingMainNs "blip")))
+  let rids = Set.toList (Set.fromList (mapMaybe (listToMaybe . attribute (officeRelNs "embed")) (docCursor $// element (drawingMainNs "blip"))))
+  () <- ExceptT (pure (if length rids > maxEmbeddedImages
+                         then Left (ErrParse (DocxTooManyImages (length rids) maxEmbeddedImages))
+                         else Right ()))
   pairs <- traverse (\rid -> (,) rid <$> loadOneImageDataUri archivePath archive rels rid) rids
   pure (Map.fromList pairs)
 
@@ -356,12 +393,33 @@ drawingToRawImage imageData drawingCursor = do
   blipCursor <- note1 "w:drawing has no a:blip" (listToMaybe (drawingCursor $// element (drawingMainNs "blip")))
   rid        <- note1 "a:blip missing r:embed" (listToMaybe (attribute (officeRelNs "embed") blipCursor))
   dataUri    <- maybe (Left (ErrParse (DocxUnresolvedRelationship rid))) Right (Map.lookup rid imageData)
-  let docPrCursors = drawingCursor $// element (wordDrawingNs "docPr")
+  let docPrCursors  = drawingCursor $// element (wordDrawingNs "docPr")
       altCandidates = concatMap (\c -> unqualifiedAttr "descr" c ++ unqualifiedAttr "title" c) docPrCursors
-      altText = fromMaybe "" (listToMaybe altCandidates)
-  pure (RawImage dataUri altText)
+      altText       = fromMaybe "" (listToMaybe altCandidates)
+      dims          = extentDimensions drawingCursor
+  pure (RawImage dataUri altText dims)
   where
     note1 msg = maybe (Left (ErrParse (DocxMalformedXml "word/document.xml" msg))) Right
+
+-- | @wp:extent@ states a drawing's rendered size as @cx@\/@cy@
+-- attributes in EMUs (English Metric Units; 9525 EMU per CSS pixel at
+-- 96 DPI) — read here so the renderer can emit @width@\/@height@ and
+-- avoid layout shift wherever DOCX already states the real size,
+-- rather than discarding a dimension the source format provides.
+-- 'Nothing' (never a crash) if the element, either attribute, or the
+-- attribute's numeric parse is absent — an image without a stated
+-- extent is unusual but not malformed.
+extentDimensions :: Cursor -> Maybe (Int, Int)
+extentDimensions drawingCursor = do
+  extentCursor <- listToMaybe (drawingCursor $// element (wordDrawingNs "extent"))
+  cxText       <- listToMaybe (unqualifiedAttr "cx" extentCursor)
+  cyText       <- listToMaybe (unqualifiedAttr "cy" extentCursor)
+  cxEmu        <- readMaybe (Text.unpack cxText)
+  cyEmu        <- readMaybe (Text.unpack cyText)
+  pure (emuToPx cxEmu, emuToPx cyEmu)
+  where
+    emuToPx :: Int -> Int
+    emuToPx emu = max 1 (emu `div` 9525)
 
 --------------------------------------------------------------------------
 -- Tables: w:tbl / w:tr / w:tc. Never treated as having a header row —

@@ -18,6 +18,7 @@ module Mirror.Renderer.Html (renderDocument) where
 
 import Data.List.NonEmpty (toList)
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 import Mirror.Document
 import Mirror.Error
@@ -37,15 +38,44 @@ checkDepth depth
 -- | Takes the resolved stylesheet href explicitly rather than
 -- hardcoding one, so "Mirror.Pipeline" controls whether the emitted
 -- page links the embedded default or a user-supplied file.
+--
+-- Emits the baseline every page needs regardless of source format
+-- (charset, viewport, @lang@, a skip link, and a single @<main>@
+-- landmark) and renders 'documentTitle', when present, as the page's
+-- @<h1>@ — not only into @<title>@ — so the heading a sighted or
+-- assistive-technology reader actually sees matches the title a
+-- browser tab shows. Scope note: Mirror does not yet renumber or
+-- reject a document whose own content also contains a top-level
+-- heading when a title is present; that stronger guarantee ("exactly
+-- one @<h1>@ no matter what the source document contains") is a
+-- follow-up validation rule, not silently assumed here.
+--
+-- @lang@ is fixed at @"en"@: Mirror has no per-document signal for
+-- source language today (Markdown, JSON, and DOCX none declare one it
+-- reads), so this is a stated, narrow default rather than a guess —
+-- a future @--lang@ pipeline option is the natural place to make it
+-- caller-controlled.
 renderDocument :: Text -> Document -> Either MirrorError Text
 renderDocument cssHref doc = do
   bodyBlocks <- traverse (blockToHtml 0) (toList (documentBlocks doc))
   pure ("<!DOCTYPE html>\n" <> renderHtml (page bodyBlocks))
   where
-    page bodyBlocks = tag "html" []
-      [ tag "head" [] [titleTag, stylesheetLink]
-      , tag "body" [] bodyBlocks
+    page bodyBlocks = tag "html" [attr "lang" "en"]
+      [ tag "head" []
+          [ selfClosingTag "meta" [attr "charset" "UTF-8"]
+          , selfClosingTag "meta"
+              [attr "name" "viewport", attr "content" "width=device-width, initial-scale=1"]
+          , titleTag
+          , stylesheetLink
+          ]
+      , tag "body" []
+          [ skipLink
+          , tag "main" [attr "id" "main"] (titleHeading <> bodyBlocks)
+          ]
       ]
+    skipLink = tag "a" [attr "class" "skip-link", attr "href" "#main"] [escape "Skip to content"]
+    titleHeading =
+      maybe [] (\t -> [tag "h1" [] [escape (unNonEmptyText t)]]) (documentTitle doc)
     titleTag = tag "title" []
       [ maybe (escape "Untitled") (escape . unNonEmptyText) (documentTitle doc) ]
     stylesheetLink = selfClosingTag "link"
@@ -71,14 +101,28 @@ blockToHtml depth block = do
       tag "blockquote" [] <$> traverse (blockToHtml (depth + 1)) (toList blocks)
     CodeBlock lang code ->
       pure (tag "pre" [] [ tag "code" (langClass lang) [ escape code ] ])
-    Image src alt ->
-      pure (selfClosingTag "img" [ attr "src" (unUrl src), attr "alt" alt ])
+    Image src alt dims ->
+      pure (selfClosingTag "img" (imageAttrs src alt dims))
     HorizontalRule ->
       pure (selfClosingTag "hr" [])
 
 headingTagName :: HeadingLevel -> Text
 headingTagName = \case
   H1 -> "h1"; H2 -> "h2"; H3 -> "h3"; H4 -> "h4"; H5 -> "h5"; H6 -> "h6"
+
+-- | @width@\/@height@ are included only when 'Image' carries a known
+-- pixel size (today: DOCX's @wp:extent@) — omitting them, rather than
+-- guessing, when the source format genuinely doesn't state a size.
+-- @loading="lazy"@ is unconditional: nothing here is ever the page's
+-- single hero/LCP image the way a hand-authored page might have one,
+-- so eager-loading has no benefit to trade away.
+imageAttrs :: Url -> Text -> Maybe (Int, Int) -> [(Text, Text)]
+imageAttrs src alt dims =
+  [ attr "src" (unUrl src), attr "alt" alt, attr "loading" "lazy" ]
+    <> maybe [] (\(w, h) -> [attr "width" (tshow w), attr "height" (tshow h)]) dims
+
+tshow :: Show a => a -> Text
+tshow = Text.pack . show
 
 listTagName :: ListKind -> Text
 listTagName = \case Ordered -> "ol"; Unordered -> "ul"
@@ -92,10 +136,10 @@ inlinesToHtml depth inlines = do
 -- 'blockToHtml' is exhaustive over 'Block'.
 inlineToHtml :: Int -> Inline -> Either MirrorError (Html 'Escaped)
 inlineToHtml depth inl = case inl of
-  Text t       -> pure (escape t)
+  Plain t      -> pure (escape t)
   Emphasis xs  -> tag "em" [] <$> inlinesToHtml (depth + 1) xs
   Strong xs    -> tag "strong" [] <$> inlinesToHtml (depth + 1) xs
-  Link url xs  -> tag "a" [attr "href" (unUrl url)] <$> inlinesToHtml (depth + 1) xs
+  Link url xs  -> tag "a" [attr "href" (unUrl url)] <$> inlinesToHtml (depth + 1) (toList xs)
   InlineCode t -> pure (tag "code" [] [ escape t ])
   SoftBreak    -> pure (selfClosingTag "br" [])
 
@@ -116,7 +160,9 @@ tableToHtml depth table = do
     rowToHtml cellTag (TableRow cells) =
       tag "tr" [] <$> traverse (cellToHtml cellTag) (toList cells)
     cellToHtml cellTag cellInlines =
-      tag cellTag [] <$> inlinesToHtml (depth + 1) cellInlines
+      tag cellTag (cellAttrs cellTag) <$> inlinesToHtml (depth + 1) cellInlines
+    cellAttrs "th" = [attr "scope" "col"]
+    cellAttrs _    = []
 
 langClass :: Maybe LanguageTag -> [(Text, Text)]
 langClass = maybe [] (\l -> [attr "class" ("language-" <> languageSlug l)])

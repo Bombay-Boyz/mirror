@@ -46,29 +46,51 @@ import Mirror.Document.Raw
 
 type Parser = Parsec Void Text
 
--- | Total. See the module note for why: 'inlineElementP''s ultimate
--- fallback, 'literalCharP', consumes exactly one character
--- unconditionally, so 'many inlineElementP' can only stop at true end
--- of input, at which point the trailing 'eof' always succeeds. The
--- 'Left' branch below is consequently expected to be unreachable; it
--- is handled with a safe, non-crashing fallback (the substring as a
--- single literal run of text) rather than assumed away with an
--- unsafe function — Megaparsec's own type honestly admits failure,
--- and this project does not paper over that with partiality (§0,
--- rule 1), even for a case reasoned to be impossible.
+-- | The public entry point always starts a fresh substring at depth
+-- zero. See 'inlinesFromSubstringAt' for the depth-bounded recursion
+-- this delegates to.
 inlinesFromSubstring :: Text -> [RawInline]
-inlinesFromSubstring sub = case parse (many inlineElementP <* eof) "" sub of
-  Right inlines -> mergeAdjacentText inlines
-  Left _        -> [RawText sub]
+inlinesFromSubstring = inlinesFromSubstringAt 0
 
-inlineElementP :: Parser RawInline
-inlineElementP = choice
-  [ try linkP
+-- | Total, for the reason 'inlinesFromSubstring' always was:
+-- 'inlineElementP''s ultimate fallback, 'literalCharP', consumes
+-- exactly one character unconditionally, so 'many (inlineElementP _)'
+-- can only stop at true end of input, at which point the trailing
+-- 'eof' always succeeds; the 'Left' branch below is consequently
+-- expected to be unreachable and is handled with a safe fallback
+-- rather than an unsafe function, per this project's ban on
+-- partiality (§0, rule 1).
+--
+-- Depth-bounded in addition, and for a distinct reason: 'strongP',
+-- 'emphasisP', and 'linkP' each recursively re-parse a captured
+-- substring (so @[**bold**](url)@ nests correctly), and nothing about
+-- Markdown's grammar limits how deep an author — or an adversary
+-- crafting input specifically to exhaust the stack — can nest
+-- @**@\/@*@\/@[...]\(...\)@ delimiters. Past 'maxInlineNestingDepth',
+-- further nested markup is deliberately not expanded further; the
+-- remaining substring is returned as one literal text run instead of
+-- being recursively reparsed. This keeps the grammar total (matching
+-- the note above) while eliminating the stack-exhaustion risk, at the
+-- cost of degrading — never crashing — on pathologically deep input
+-- that no legitimate document would ever produce.
+maxInlineNestingDepth :: Int
+maxInlineNestingDepth = 64
+
+inlinesFromSubstringAt :: Int -> Text -> [RawInline]
+inlinesFromSubstringAt depth sub
+  | depth > maxInlineNestingDepth = [RawText sub]
+  | otherwise = case parse (many (inlineElementP depth) <* eof) "" sub of
+      Right inlines -> mergeAdjacentText inlines
+      Left _        -> [RawText sub]
+
+inlineElementP :: Int -> Parser RawInline
+inlineElementP depth = choice
+  [ try (linkP depth)
   , try codeSpanP
-  , try (strongP '*')
-  , try (strongP '_')
-  , try (emphasisP '*')
-  , try (emphasisP '_')
+  , try (strongP depth '*')
+  , try (strongP depth '_')
+  , try (emphasisP depth '*')
+  , try (emphasisP depth '_')
   , try escapedCharP
   , softBreakP
   , literalCharP
@@ -101,35 +123,35 @@ codeSpanP = do
 -- | @**strong**@ or @__strong__@. See the module note: the search for
 -- the closing pair is a plain character scan, not a recursive
 -- invocation of 'inlineElementP'.
-strongP :: Char -> Parser RawInline
-strongP delim = do
+strongP :: Int -> Char -> Parser RawInline
+strongP depth delim = do
   _   <- count 2 (char delim)
   raw <- rawUntil (count 2 (char delim))
-  pure (RawStrong (inlinesFromSubstring raw))
+  pure (RawStrong (inlinesFromSubstringAt (depth + 1) raw))
 
 -- | @*emphasis*@ or @_emphasis_@. Combined @***strong and emphasis***@
 -- in one delimiter run is not specially resolved — write
 -- @**_this_**@ instead — a deliberate simplification short of full
 -- CommonMark delimiter-run precedence, which this module does not
 -- attempt to reproduce.
-emphasisP :: Char -> Parser RawInline
-emphasisP delim = do
+emphasisP :: Int -> Char -> Parser RawInline
+emphasisP depth delim = do
   _   <- char delim
   raw <- rawUntil (char delim)
-  pure (RawEmphasis (inlinesFromSubstring raw))
+  pure (RawEmphasis (inlinesFromSubstringAt (depth + 1) raw))
 
 -- | Link text is recursively parsed (so @[**bold** link](url)@
 -- works); the destination is taken verbatim and validated later, by
 -- the same 'Mirror.Document.mkUrl' every other source uses (§3).
 -- A destination containing a literal, unescaped @)@ is not supported —
 -- wrap it in a shorter link or accept the simplification.
-linkP :: Parser RawInline
-linkP = do
+linkP :: Int -> Parser RawInline
+linkP depth = do
   _       <- char '['
   altText <- rawUntil (char ']')
   _       <- char '('
   url     <- rawUntil (char ')')
-  pure (RawLink url (inlinesFromSubstring altText))
+  pure (RawLink url (inlinesFromSubstringAt (depth + 1) altText))
 
 -- | The one place 'many'\/'eof' is not the terminating combinator:
 -- 'literalCharP' is tried only after every special construct above

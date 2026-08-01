@@ -56,7 +56,7 @@ parseJson bytes = do
   (rawTitle, rawBody) <- first (ErrParse . JsonSchemaViolation . Text.pack)
                                 (parseEither rawDocumentParser value)
   title  <- traverse mkNonEmptyText rawTitle
-  blocks <- traverse toBlock rawBody
+  blocks <- traverse (toBlock 0) rawBody
   mkDocument title blocks
 
 --------------------------------------------------------------------------
@@ -99,9 +99,11 @@ rawBlockParser = withObject "block" $ \o -> do
       code     <- o .: "code"
       pure (RawCodeBlock language code)
     "image" -> do
-      src <- o .: "src"
-      alt <- o .: "alt"
-      pure (RawImage src alt)
+      src    <- o .: "src"
+      alt    <- o .: "alt"
+      width  <- o .:? "width"
+      height <- o .:? "height"
+      pure (RawImage src alt ((,) <$> width <*> height))
     "rule" -> pure RawHorizontalRule
     other  -> fail ("unrecognised block \"type\": " <> Text.unpack other)
 

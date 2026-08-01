@@ -7,14 +7,16 @@ parser is validated against identically.
 All three formats now cover the full intermediate representation:
 headings, paragraphs, bold/italic, inline code, links, ordered and
 unordered lists, block quotes, fenced code blocks, tables, images, and
-horizontal rules. A few deliberate simplifications are documented in
-the spec (§13) — notably that lists are single-level (not nested) in
+horizontal rules. A few deliberate simplifications are called out
+where they apply — notably that lists are single-level (not nested) in
 both Markdown and DOCX, and that DOCX heading/quote detection relies on
 Word's built-in style IDs.
 
-See `Mirror_Implementation_Spec.md` for the full design rationale —
-every module below is explained there, in order, with the reasoning
-behind each decision. This README is just how to build and run it.
+The design rationale lives in the module Haddocks themselves — start
+with `Mirror.Document` (the canonical IR and its smart constructors),
+then `Mirror.Document.Raw` (the shared raw-to-validated staging layer),
+then whichever parser or renderer module you're changing. This README
+is just how to build and run it.
 
 ## Build
 

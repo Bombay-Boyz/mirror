@@ -37,6 +37,7 @@ module Mirror.Document
     -- Smart constructors (the only way to build the refined types above)
   , mkNonEmptyText
   , mkUrl
+  , mkImageUrl
   , mkDocument
   , mkTable
   , headingLevelFromInt
@@ -54,6 +55,7 @@ import qualified Data.List.NonEmpty as NE
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Text.URI (mkURI)
+import qualified Text.URI as URI
 
 import Mirror.Error
 
@@ -103,9 +105,16 @@ data Block
   | TableBlock Table
   | BlockQuote (NonEmpty Block)
   | CodeBlock (Maybe LanguageTag) Text
-  | Image Url Text
+  | Image Url Text (Maybe (Int, Int))
     -- ^ Alt text is plain 'Text'. An empty alt attribute is not an
     -- error — it is the standard, correct HTML for a decorative image.
+    -- The pixel dimensions are 'Just' only when the source format
+    -- states them explicitly (DOCX's @wp:extent@); 'Nothing' for
+    -- Markdown\/JSON, where no dimension is knowable without fetching
+    -- the asset — a stated, narrow limitation rather than a silent
+    -- gap. The renderer (§9) emits @width@\/@height@ attributes only
+    -- when this is 'Just', to avoid Cumulative Layout Shift wherever
+    -- the dimension is actually known.
   | HorizontalRule
   deriving (Eq, Show)
 
@@ -145,10 +154,23 @@ tableColumnCount :: Table -> Int
 tableColumnCount (UnsafeTable _ (TableRow cells :| _)) = length cells
 
 data Inline
-  = Text Text
+  = Plain Text
+    -- ^ Named 'Plain', not 'Text', deliberately: this constructor
+    -- lives in a module that also imports and pervasively uses
+    -- @Data.Text@'s 'Text' /type/. Naming the constructor identically
+    -- to that type means "Text" refers to two unrelated things
+    -- depending on term\/type context at every call site — exactly
+    -- the ambiguity §4.8 of the Haskell standard warns against.
   | Emphasis [Inline]
   | Strong [Inline]
-  | Link Url [Inline]
+  | Link Url (NonEmpty Inline)
+    -- ^ Unlike a paragraph's or table cell's inline content, a link's
+    -- visible text is not "ordinary, possibly-empty data": an anchor
+    -- with nothing to anchor is both inaccessible (no accessible name
+    -- for assistive technology) and unusable (nothing to click). The
+    -- type itself rules this out, the same way 'NonEmpty' already
+    -- rules out a list or table with no rows — see 'Document.Raw.toInline'
+    -- for where an empty raw link is rejected as 'EmptyLinkText'.
   | InlineCode Text
   | SoftBreak
   deriving (Eq, Show)
@@ -168,13 +190,53 @@ mkNonEmptyText t
   | Text.null (Text.strip t) = Left (ErrValidation EmptyDocumentTitle)
   | otherwise                 = Right (UnsafeNonEmptyText t)
 
--- | Delegates syntactic validation to @modern-uri@'s 'mkURI', which is
--- total (a 'Maybe', never a partial parse), so there is no hand-rolled
--- URL grammar to get wrong.
+-- | Closed, deliberately short allow-lists of URL schemes Mirror will
+-- ever emit into an @href@ or @src@ attribute. This is a security
+-- boundary, not a style preference: a syntactically valid URI with a
+-- scheme like @javascript:@ or @vbscript:@ is exactly as well-formed
+-- as an @https:@ one to 'mkURI', but executes attacker-supplied
+-- content the instant a reader clicks it or loads it — and Mirror's
+-- three input formats (a Markdown file, a JSON document, a @.docx@
+-- someone emailed you) are all plausibly untrusted.
+--
+-- Links and images are given /different/ allow-lists, deliberately,
+-- rather than one shared list: an embedded DOCX image is legitimately
+-- a @data:@ URI (§7 — images are embedded as base64 data URIs), but a
+-- clickable @<a href="data:text/html,...">@ is its own, separate
+-- script-injection surface most browsers will still navigate to, so
+-- @data:@ is allowed for 'mkImageUrl' and refused for 'mkUrl'. A
+-- scheme outside the relevant set is 'DisallowedUrlScheme', never
+-- silently accepted by either.
+allowedLinkUrlSchemes :: [Text]
+allowedLinkUrlSchemes = ["http", "https", "mailto"]
+
+allowedImageUrlSchemes :: [Text]
+allowedImageUrlSchemes = ["http", "https", "data"]
+
+-- | Shared implementation: delegates syntactic validation to
+-- @modern-uri@'s 'mkURI', which is total (a 'Maybe', never a partial
+-- parse), so there is no hand-rolled URL grammar to get wrong — then
+-- additionally restricts the result to the given allow-list. A
+-- scheme-less (relative) reference has no 'URI.uriScheme' at all and
+-- is accepted as-is, since a relative link or image path cannot
+-- itself carry an executable scheme.
+mkUrlWith :: [Text] -> Text -> Either MirrorError Url
+mkUrlWith allowed t = do
+  uri <- note (ErrValidation (InvalidUrl t)) (mkURI t)
+  case URI.unRText <$> URI.uriScheme uri of
+    Nothing -> Right (UnsafeUrl t)
+    Just scheme
+      | Text.toLower scheme `elem` allowed -> Right (UnsafeUrl t)
+      | otherwise -> Left (ErrValidation (DisallowedUrlScheme scheme))
+
+-- | For a hyperlink's destination ('Mirror.Document.Link').
 mkUrl :: Text -> Either MirrorError Url
-mkUrl t = case mkURI t of
-  Nothing -> Left (ErrValidation (InvalidUrl t))
-  Just _  -> Right (UnsafeUrl t)
+mkUrl = mkUrlWith allowedLinkUrlSchemes
+
+-- | For an image's @src@ ('Mirror.Document.Image'). Permits @data:@
+-- in addition to 'mkUrl''s allow-list, for embedded DOCX images.
+mkImageUrl :: Text -> Either MirrorError Url
+mkImageUrl = mkUrlWith allowedImageUrlSchemes
 
 mkDocument :: Maybe NonEmptyText -> [Block] -> Either MirrorError Document
 mkDocument title blocks =

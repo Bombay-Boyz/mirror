@@ -75,6 +75,26 @@ data ParseError
   | DocxUnsupportedImageFormat Text
     -- ^ An embedded image's file extension isn't one of the closed,
     -- recognised set (§7) Mirror knows how to embed as a data URI.
+  | DocxPartTooLarge Text Integer Integer
+    -- ^ Part name, its declared uncompressed size, and the configured
+    -- ceiling it exceeded. Reported before the part is fully
+    -- decompressed, guarding against a small, maliciously crafted zip
+    -- entry expanding into an unbounded amount of memory (a "zip
+    -- bomb") — the same "resource bound, checked, not assumed"
+    -- discipline already applied to recursive-structure nesting.
+  | DocxTooManyImages Int Int
+    -- ^ Number of distinct embedded images found, and the configured
+    -- ceiling — guards against a document referencing an unbounded
+    -- number of images each requiring a full in-memory base64 copy.
+  | ExcessiveNestingDepth Int
+    -- ^ A parsed document's block\/inline structure exceeded Mirror's
+    -- nesting-depth ceiling /before/ rendering — checked at parse time
+    -- (unlike 'Mirror.Error.RenderError''s 'UnrenderableNestingDepth',
+    -- which guards the render stage) because 'Mirror.Document.Raw'
+    -- and the Markdown inline grammar both recursively materialise a
+    -- document's full tree and are each independently capable of
+    -- exhausting the stack on adversarial input, prior to any
+    -- rendering step running at all.
   deriving (Eq, Show)
 
 data ValidationError
@@ -98,9 +118,27 @@ data ValidationError
   | MismatchedTableColumns Int Int
     -- ^ Canonical (first-row) width, and the width of the offending row.
   | InvalidUrl Text
+    -- ^ Not a syntactically valid URI at all.
+  | DisallowedUrlScheme Text
+    -- ^ A syntactically valid URI whose scheme is outside Mirror's
+    -- closed allow-list (§3) — kept distinct from 'InvalidUrl' because
+    -- "malformed" and "syntactically fine but forbidden" are different
+    -- facts a user needs to act on differently, the same distinction
+    -- 'EmptyTable'\/'EmptyTableRow' already draws for tables.
   | InvalidLanguageTag Text
     -- ^ A code block named a fenced-code language outside Mirror's
     -- closed, recognised set (§3).
+  | InvalidHeadingLevel Int
+    -- ^ A heading's level fell outside 1..6. Format-independent: every
+    -- source's raw heading level is checked identically by
+    -- 'Mirror.Document.Raw.toBlock', so this is never tagged as a
+    -- JSON-, Markdown-, or DOCX-specific failure even though only
+    -- JSON's free-form @"level"@ field can produce it today.
+  | EmptyLinkText
+    -- ^ A hyperlink whose visible text is empty. Unlike a paragraph or
+    -- a table cell, an anchor with no content is not "ordinary,
+    -- possibly-empty data" — it is both inaccessible (no accessible
+    -- name for assistive technology) and unusable (nothing to click).
   deriving (Eq, Show)
 
 -- | Failures possible while turning a validated 'Mirror.Document.Document'
@@ -159,6 +197,14 @@ renderParseError = \case
     "list numbering id \"" <> numId <> "\" has no resolvable format in the document's numbering part"
   DocxUnsupportedImageFormat ext ->
     "embedded image format \"" <> ext <> "\" is not one of Mirror's recognised set"
+  DocxPartTooLarge part size limit ->
+    "DOCX part \"" <> part <> "\" is " <> tshow size <> " bytes uncompressed, exceeding the "
+      <> tshow limit <> "-byte limit"
+  DocxTooManyImages count limit ->
+    "DOCX document references " <> tshow count <> " embedded images, exceeding the "
+      <> tshow limit <> "-image limit"
+  ExcessiveNestingDepth d ->
+    "nesting depth " <> tshow d <> " exceeds Mirror's limit while parsing the document"
 
 renderValidationError :: ValidationError -> Text
 renderValidationError = \case
@@ -170,8 +216,11 @@ renderValidationError = \case
   EmptyBlockQuote    -> "a block quote must contain at least one block"
   MismatchedTableColumns expected got ->
     "table row has " <> tshow got <> " columns, expected " <> tshow expected
-  InvalidUrl u         -> "not a valid URL: " <> u
-  InvalidLanguageTag t -> "not a recognised code-block language: " <> t
+  InvalidUrl u           -> "not a valid URL: " <> u
+  DisallowedUrlScheme s  -> "URL scheme \"" <> s <> "\" is not permitted (only http, https, mailto)"
+  InvalidLanguageTag t   -> "not a recognised code-block language: " <> t
+  InvalidHeadingLevel n  -> "heading level must be an integer from 1 to 6, got " <> tshow n
+  EmptyLinkText          -> "a link must have non-empty visible text"
 
 renderRenderError :: RenderError -> Text
 renderRenderError = \case

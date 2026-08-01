@@ -28,10 +28,27 @@ module Mirror.Document.Raw
 
 import Data.List.NonEmpty (nonEmpty)
 import Data.Text (Text)
-import qualified Data.Text as Text
 
 import Mirror.Document
 import Mirror.Error
+
+-- | Applied uniformly to every recursive descent in this module — the
+-- same ceiling 'Mirror.Renderer.Html' enforces at the render stage,
+-- but enforced here too because this is where 'RawBlock'\/'RawInline'
+-- (already fully recursive trees, however they were produced — a
+-- deeply nested JSON payload, or a Markdown inline grammar recursing
+-- on captured substrings) are first converted to 'Block'\/'Inline'.
+-- Checking depth only in the renderer left this exact stage unguarded:
+-- a document nested deeper than the renderer's own limit would
+-- exhaust the stack /here/, before rendering ever got a chance to
+-- reject it cleanly.
+maxRawNestingDepth :: Int
+maxRawNestingDepth = 64
+
+checkRawDepth :: Int -> Either MirrorError ()
+checkRawDepth depth
+  | depth > maxRawNestingDepth = Left (ErrParse (ExcessiveNestingDepth depth))
+  | otherwise                  = Right ()
 
 -- | A 'Block' with every constructor's shape but unvalidated leaves.
 data RawBlock
@@ -41,7 +58,9 @@ data RawBlock
   | RawTable (Maybe RawRow) [RawRow]
   | RawBlockQuote [RawBlock]
   | RawCodeBlock (Maybe Text) Text
-  | RawImage Text Text
+  | RawImage Text Text (Maybe (Int, Int))
+    -- ^ Src, alt, and optional pixel dimensions — 'Just' only from a
+    -- source format that states them explicitly (DOCX's @wp:extent@).
   | RawHorizontalRule
   deriving Show
 
@@ -58,52 +77,65 @@ data RawInline
 type RawCell = [RawInline]
 type RawRow  = [RawCell]
 
-toBlock :: RawBlock -> Either MirrorError Block
-toBlock (RawHeading levelInt rawInlines) = do
-  level   <- note (ErrParse (JsonSchemaViolation (badHeadingLevel levelInt))) (headingLevelFromInt levelInt)
-  inlines <- traverse toInline rawInlines
-  pure (Heading level inlines)
-toBlock (RawParagraph rawInlines) =
-  Paragraph <$> traverse toInline rawInlines
-toBlock (RawList kindText rawItems) = do
-  kind    <- note (ErrParse (JsonSchemaViolation (badListKind kindText))) (listKindFromText kindText)
-  items   <- traverse toListItem rawItems
-  itemsNE <- note (ErrValidation EmptyList) (nonEmpty items)
-  pure (BulletList kind itemsNE)
-toBlock (RawTable rawHeader rawRows) = do
-  header <- traverse toRawCells rawHeader
-  rows   <- traverse toRawCells rawRows
-  mkTable header rows
+-- | Every recursive descent below is depth-checked at entry via
+-- 'checkRawDepth', and every recursive call passes @depth + 1@ —
+-- applied uniformly across every constructor capable of nesting
+-- ('RawBlockQuote', 'RawList' items, 'RawTable' cells, 'RawEmphasis'\/
+-- 'RawStrong'\/'RawLink' in 'toInline'), not just the ones an author
+-- happened to think of first.
+toBlock :: Int -> RawBlock -> Either MirrorError Block
+toBlock depth raw = do
+  checkRawDepth depth
+  case raw of
+    RawHeading levelInt rawInlines -> do
+      level   <- note (ErrValidation (InvalidHeadingLevel levelInt)) (headingLevelFromInt levelInt)
+      inlines <- traverse (toInline (depth + 1)) rawInlines
+      pure (Heading level inlines)
+    RawParagraph rawInlines ->
+      Paragraph <$> traverse (toInline (depth + 1)) rawInlines
+    RawList kindText rawItems -> do
+      kind    <- note (ErrParse (JsonSchemaViolation (badListKind kindText))) (listKindFromText kindText)
+      items   <- traverse (toListItem (depth + 1)) rawItems
+      itemsNE <- note (ErrValidation EmptyList) (nonEmpty items)
+      pure (BulletList kind itemsNE)
+    RawTable rawHeader rawRows -> do
+      header <- traverse (toRawCells (depth + 1)) rawHeader
+      rows   <- traverse (toRawCells (depth + 1)) rawRows
+      mkTable header rows
+    RawBlockQuote rawBlocks -> do
+      blocks   <- traverse (toBlock (depth + 1)) rawBlocks
+      blocksNE <- note (ErrValidation EmptyBlockQuote) (nonEmpty blocks)
+      pure (BlockQuote blocksNE)
+    RawCodeBlock rawLanguage code -> do
+      language <- traverse toLanguageTag rawLanguage
+      pure (CodeBlock language code)
+    RawImage src alt dims -> do
+      url <- mkImageUrl src
+      pure (Image url alt dims)
+    RawHorizontalRule -> pure HorizontalRule
   where
-    toRawCells = traverse (traverse toInline)
-toBlock (RawBlockQuote rawBlocks) = do
-  blocks   <- traverse toBlock rawBlocks
-  blocksNE <- note (ErrValidation EmptyBlockQuote) (nonEmpty blocks)
-  pure (BlockQuote blocksNE)
-toBlock (RawCodeBlock rawLanguage code) = do
-  language <- traverse toLanguageTag rawLanguage
-  pure (CodeBlock language code)
-toBlock (RawImage src alt) = do
-  url <- mkUrl src
-  pure (Image url alt)
-toBlock RawHorizontalRule = pure HorizontalRule
+    toRawCells d = traverse (traverse (toInline d))
 
-toListItem :: [RawBlock] -> Either MirrorError ListItem
-toListItem rawBlocks = ListItem <$> traverse toBlock rawBlocks
+toListItem :: Int -> [RawBlock] -> Either MirrorError ListItem
+toListItem depth rawBlocks = ListItem <$> traverse (toBlock depth) rawBlocks
 
 toLanguageTag :: Text -> Either MirrorError LanguageTag
 toLanguageTag t = note (ErrValidation (InvalidLanguageTag t)) (languageTagFromText t)
 
-toInline :: RawInline -> Either MirrorError Inline
-toInline (RawText t)       = pure (Text t)
-toInline (RawEmphasis xs)  = Emphasis <$> traverse toInline xs
-toInline (RawStrong xs)    = Strong <$> traverse toInline xs
-toInline (RawLink href xs) = Link <$> mkUrl href <*> traverse toInline xs
-toInline (RawInlineCode t) = pure (InlineCode t)
-toInline RawSoftBreak      = pure SoftBreak
-
-badHeadingLevel :: Int -> Text
-badHeadingLevel n = "heading \"level\" must be an integer from 1 to 6, got " <> Text.pack (show n)
+toInline :: Int -> RawInline -> Either MirrorError Inline
+toInline depth raw = do
+  checkRawDepth depth
+  case raw of
+    RawText t       -> pure (Plain t)
+    RawEmphasis xs  -> Emphasis <$> traverse (toInline (depth + 1)) xs
+    RawStrong xs    -> Strong <$> traverse (toInline (depth + 1)) xs
+    RawLink href xs -> do
+      url       <- mkUrl href
+      inlines   <- traverse (toInline (depth + 1)) xs
+      inlinesNE <- note (ErrValidation EmptyLinkText) (nonEmpty inlines)
+      pure (Link url inlinesNE)
+    RawInlineCode t -> pure (InlineCode t)
+    RawSoftBreak    -> pure SoftBreak
 
 badListKind :: Text -> Text
 badListKind t = "list \"kind\" must be \"ordered\" or \"unordered\", got " <> t

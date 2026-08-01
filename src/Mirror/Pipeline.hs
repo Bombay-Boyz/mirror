@@ -23,6 +23,7 @@ module Mirror.Pipeline
 import Control.Exception (IOException, try)
 import Control.Monad.Trans.Except (ExceptT (..), except, runExceptT)
 import qualified Data.ByteString.Lazy as BSL
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TIO
@@ -59,7 +60,7 @@ mkPipelineConfig input cssPath outPath = do
   pure PipelineConfig
     { cfgInputPath      = input
     , cfgInputFormat    = fmt
-    , cfgOutputPath     = maybe (replaceExtension input ".html") id outPath
+    , cfgOutputPath     = fromMaybe (replaceExtension input ".html") outPath
     , cfgStylesheetPath = cssPath
     }
 

@@ -1,0 +1,1417 @@
+diff --git a/README.md b/README.md
+index 7b55004..35ff79e 100644
+--- a/README.md
++++ b/README.md
+@@ -7,14 +7,16 @@ parser is validated against identically.
+ All three formats now cover the full intermediate representation:
+ headings, paragraphs, bold/italic, inline code, links, ordered and
+ unordered lists, block quotes, fenced code blocks, tables, images, and
+-horizontal rules. A few deliberate simplifications are documented in
+-the spec (§13) — notably that lists are single-level (not nested) in
++horizontal rules. A few deliberate simplifications are called out
++where they apply — notably that lists are single-level (not nested) in
+ both Markdown and DOCX, and that DOCX heading/quote detection relies on
+ Word's built-in style IDs.
+ 
+-See `Mirror_Implementation_Spec.md` for the full design rationale —
+-every module below is explained there, in order, with the reasoning
+-behind each decision. This README is just how to build and run it.
++The design rationale lives in the module Haddocks themselves — start
++with `Mirror.Document` (the canonical IR and its smart constructors),
++then `Mirror.Document.Raw` (the shared raw-to-validated staging layer),
++then whichever parser or renderer module you're changing. This README
++is just how to build and run it.
+ 
+ ## Build
+ 
+diff --git a/mirror.cabal b/mirror.cabal
+index d7c2409..c044c93 100644
+--- a/mirror.cabal
++++ b/mirror.cabal
+@@ -11,6 +11,9 @@ common warnings
+     -Wincomplete-record-updates
+     -Wmissing-export-lists
+     -Wunused-imports
++    -Wunused-top-binds
++    -Wunused-local-binds
++    -Wunused-matches
+     -Wredundant-constraints
+     -Wpartial-fields
+     -Widentities
+diff --git a/src/Mirror/Css/Default.css b/src/Mirror/Css/Default.css
+index 16f6330..4aeac3e 100644
+--- a/src/Mirror/Css/Default.css
++++ b/src/Mirror/Css/Default.css
+@@ -1,44 +1,138 @@
++/* ==========================================================================
++   1. SETTINGS — design tokens. No visible output from this layer alone.
++   ========================================================================== */
+ :root {
+   color-scheme: light dark;
++
++  --color-text: #1a1a1a;
++  --color-bg: #ffffff;
++  --color-border: currentColor;
++  --color-link: #0b5fff;
++
++  --space-1: 0.4em;
++  --space-2: 0.6em;
++  --space-3: 1em;
++  --space-4: 1.25rem;
++  --space-5: 2.5rem;
++
++  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
++  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
++
++  --line-height-body: 1.6;
++  --line-height-heading: 1.25;
++
++  --radius-sm: 0.4em;
++
++  --measure: 42rem;
++
++  --bp-tablet: 48rem; /* 768px */
++}
++
++@media (prefers-color-scheme: dark) {
++  :root {
++    --color-text: #f2f2f2;
++    --color-bg: #121212;
++    --color-link: #7aa7ff;
++  }
+ }
+ 
++/* ==========================================================================
++   2. GENERIC — minimal reset.
++   ========================================================================== */
++*, *::before, *::after {
++  box-sizing: border-box;
++}
++
++/* ==========================================================================
++   3. ELEMENTS — bare HTML element defaults.
++   ========================================================================== */
+ body {
+-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+-  max-width: 42rem;
+-  margin: 2.5rem auto;
+-  padding: 0 1.25rem;
+-  line-height: 1.6;
++  font-family: var(--font-sans);
++  color: var(--color-text);
++  background: var(--color-bg);
++  max-width: var(--measure);
++  margin: var(--space-5) auto;
++  padding: 0 var(--space-4);
++  line-height: var(--line-height-body);
+ }
+ 
+ h1, h2, h3, h4, h5, h6 {
+-  line-height: 1.25;
++  line-height: var(--line-height-heading);
+   margin-top: 2em;
+ }
+ 
++a {
++  color: var(--color-link);
++}
++
+ table {
+   border-collapse: collapse;
+   width: 100%;
+ }
+ 
+ th, td {
+-  border: 1px solid currentColor;
+-  padding: 0.4em 0.6em;
++  border: 1px solid var(--color-border);
++  padding: var(--space-1) var(--space-2);
+   text-align: left;
+ }
+ 
+ blockquote {
+-  border-left: 3px solid currentColor;
++  border-left: 3px solid var(--color-border);
+   margin-left: 0;
+-  padding-left: 1em;
++  padding-left: var(--space-3);
+   opacity: 0.85;
+ }
+ 
+ pre {
+   overflow-x: auto;
+-  padding: 0.75em 1em;
+-  border-radius: 0.4em;
++  padding: var(--space-2) var(--space-3);
++  border-radius: var(--radius-sm);
+ }
+ 
+ code {
+-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
++  font-family: var(--font-mono);
++}
++
++img, video, iframe {
++  max-width: 100%;
++  height: auto;
++}
++
++/* ==========================================================================
++   6. UTILITIES — single-purpose overrides.
++   ========================================================================== */
++
++/* Visually hidden until focused, per web-engineering-standard §1.10: the
++   first focusable element on the page, so keyboard users can bypass
++   whatever body content precedes <main>. */
++.skip-link {
++  position: absolute;
++  top: -3em;
++  left: 0;
++  padding: var(--space-2) var(--space-3);
++  background: var(--color-bg);
++  color: var(--color-text);
++  z-index: 100;
++}
++
++.skip-link:focus {
++  top: 0;
++}
++
++/* ==========================================================================
++   User preferences — respected unconditionally, not opt-in (§2.8).
++   ========================================================================== */
++@media (prefers-reduced-motion: reduce) {
++  *, *::before, *::after {
++    animation-duration: 0.001ms !important;
++    animation-iteration-count: 1 !important;
++    transition-duration: 0.001ms !important;
++    scroll-behavior: auto !important;
++  }
++}
++
++@media print {
++  .skip-link {
++    display: none;
++  }
+ }
+diff --git a/src/Mirror/Document.hs b/src/Mirror/Document.hs
+index 87d6275..c60e015 100644
+--- a/src/Mirror/Document.hs
++++ b/src/Mirror/Document.hs
+@@ -37,6 +37,7 @@ module Mirror.Document
+     -- Smart constructors (the only way to build the refined types above)
+   , mkNonEmptyText
+   , mkUrl
++  , mkImageUrl
+   , mkDocument
+   , mkTable
+   , headingLevelFromInt
+@@ -54,6 +55,7 @@ import qualified Data.List.NonEmpty as NE
+ import Data.Text (Text)
+ import qualified Data.Text as Text
+ import Text.URI (mkURI)
++import qualified Text.URI as URI
+ 
+ import Mirror.Error
+ 
+@@ -103,9 +105,16 @@ data Block
+   | TableBlock Table
+   | BlockQuote (NonEmpty Block)
+   | CodeBlock (Maybe LanguageTag) Text
+-  | Image Url Text
++  | Image Url Text (Maybe (Int, Int))
+     -- ^ Alt text is plain 'Text'. An empty alt attribute is not an
+     -- error — it is the standard, correct HTML for a decorative image.
++    -- The pixel dimensions are 'Just' only when the source format
++    -- states them explicitly (DOCX's @wp:extent@); 'Nothing' for
++    -- Markdown\/JSON, where no dimension is knowable without fetching
++    -- the asset — a stated, narrow limitation rather than a silent
++    -- gap. The renderer (§9) emits @width@\/@height@ attributes only
++    -- when this is 'Just', to avoid Cumulative Layout Shift wherever
++    -- the dimension is actually known.
+   | HorizontalRule
+   deriving (Eq, Show)
+ 
+@@ -145,10 +154,23 @@ tableColumnCount :: Table -> Int
+ tableColumnCount (UnsafeTable _ (TableRow cells :| _)) = length cells
+ 
+ data Inline
+-  = Text Text
++  = Plain Text
++    -- ^ Named 'Plain', not 'Text', deliberately: this constructor
++    -- lives in a module that also imports and pervasively uses
++    -- @Data.Text@'s 'Text' /type/. Naming the constructor identically
++    -- to that type means "Text" refers to two unrelated things
++    -- depending on term\/type context at every call site — exactly
++    -- the ambiguity §4.8 of the Haskell standard warns against.
+   | Emphasis [Inline]
+   | Strong [Inline]
+-  | Link Url [Inline]
++  | Link Url (NonEmpty Inline)
++    -- ^ Unlike a paragraph's or table cell's inline content, a link's
++    -- visible text is not "ordinary, possibly-empty data": an anchor
++    -- with nothing to anchor is both inaccessible (no accessible name
++    -- for assistive technology) and unusable (nothing to click). The
++    -- type itself rules this out, the same way 'NonEmpty' already
++    -- rules out a list or table with no rows — see 'Document.Raw.toInline'
++    -- for where an empty raw link is rejected as 'EmptyLinkText'.
+   | InlineCode Text
+   | SoftBreak
+   deriving (Eq, Show)
+@@ -168,13 +190,53 @@ mkNonEmptyText t
+   | Text.null (Text.strip t) = Left (ErrValidation EmptyDocumentTitle)
+   | otherwise                 = Right (UnsafeNonEmptyText t)
+ 
+--- | Delegates syntactic validation to @modern-uri@'s 'mkURI', which is
+--- total (a 'Maybe', never a partial parse), so there is no hand-rolled
+--- URL grammar to get wrong.
++-- | Closed, deliberately short allow-lists of URL schemes Mirror will
++-- ever emit into an @href@ or @src@ attribute. This is a security
++-- boundary, not a style preference: a syntactically valid URI with a
++-- scheme like @javascript:@ or @vbscript:@ is exactly as well-formed
++-- as an @https:@ one to 'mkURI', but executes attacker-supplied
++-- content the instant a reader clicks it or loads it — and Mirror's
++-- three input formats (a Markdown file, a JSON document, a @.docx@
++-- someone emailed you) are all plausibly untrusted.
++--
++-- Links and images are given /different/ allow-lists, deliberately,
++-- rather than one shared list: an embedded DOCX image is legitimately
++-- a @data:@ URI (§7 — images are embedded as base64 data URIs), but a
++-- clickable @<a href="data:text/html,...">@ is its own, separate
++-- script-injection surface most browsers will still navigate to, so
++-- @data:@ is allowed for 'mkImageUrl' and refused for 'mkUrl'. A
++-- scheme outside the relevant set is 'DisallowedUrlScheme', never
++-- silently accepted by either.
++allowedLinkUrlSchemes :: [Text]
++allowedLinkUrlSchemes = ["http", "https", "mailto"]
++
++allowedImageUrlSchemes :: [Text]
++allowedImageUrlSchemes = ["http", "https", "data"]
++
++-- | Shared implementation: delegates syntactic validation to
++-- @modern-uri@'s 'mkURI', which is total (a 'Maybe', never a partial
++-- parse), so there is no hand-rolled URL grammar to get wrong — then
++-- additionally restricts the result to the given allow-list. A
++-- scheme-less (relative) reference has no 'URI.uriScheme' at all and
++-- is accepted as-is, since a relative link or image path cannot
++-- itself carry an executable scheme.
++mkUrlWith :: [Text] -> Text -> Either MirrorError Url
++mkUrlWith allowed t = do
++  uri <- note (ErrValidation (InvalidUrl t)) (mkURI t)
++  case URI.unRText <$> URI.uriScheme uri of
++    Nothing -> Right (UnsafeUrl t)
++    Just scheme
++      | Text.toLower scheme `elem` allowed -> Right (UnsafeUrl t)
++      | otherwise -> Left (ErrValidation (DisallowedUrlScheme scheme))
++
++-- | For a hyperlink's destination ('Mirror.Document.Link').
+ mkUrl :: Text -> Either MirrorError Url
+-mkUrl t = case mkURI t of
+-  Nothing -> Left (ErrValidation (InvalidUrl t))
+-  Just _  -> Right (UnsafeUrl t)
++mkUrl = mkUrlWith allowedLinkUrlSchemes
++
++-- | For an image's @src@ ('Mirror.Document.Image'). Permits @data:@
++-- in addition to 'mkUrl''s allow-list, for embedded DOCX images.
++mkImageUrl :: Text -> Either MirrorError Url
++mkImageUrl = mkUrlWith allowedImageUrlSchemes
+ 
+ mkDocument :: Maybe NonEmptyText -> [Block] -> Either MirrorError Document
+ mkDocument title blocks =
+diff --git a/src/Mirror/Document/Raw.hs b/src/Mirror/Document/Raw.hs
+index c326baa..76617f9 100644
+--- a/src/Mirror/Document/Raw.hs
++++ b/src/Mirror/Document/Raw.hs
+@@ -28,11 +28,28 @@ module Mirror.Document.Raw
+ 
+ import Data.List.NonEmpty (nonEmpty)
+ import Data.Text (Text)
+-import qualified Data.Text as Text
+ 
+ import Mirror.Document
+ import Mirror.Error
+ 
++-- | Applied uniformly to every recursive descent in this module — the
++-- same ceiling 'Mirror.Renderer.Html' enforces at the render stage,
++-- but enforced here too because this is where 'RawBlock'\/'RawInline'
++-- (already fully recursive trees, however they were produced — a
++-- deeply nested JSON payload, or a Markdown inline grammar recursing
++-- on captured substrings) are first converted to 'Block'\/'Inline'.
++-- Checking depth only in the renderer left this exact stage unguarded:
++-- a document nested deeper than the renderer's own limit would
++-- exhaust the stack /here/, before rendering ever got a chance to
++-- reject it cleanly.
++maxRawNestingDepth :: Int
++maxRawNestingDepth = 64
++
++checkRawDepth :: Int -> Either MirrorError ()
++checkRawDepth depth
++  | depth > maxRawNestingDepth = Left (ErrParse (ExcessiveNestingDepth depth))
++  | otherwise                  = Right ()
++
+ -- | A 'Block' with every constructor's shape but unvalidated leaves.
+ data RawBlock
+   = RawHeading Int [RawInline]
+@@ -41,7 +58,9 @@ data RawBlock
+   | RawTable (Maybe RawRow) [RawRow]
+   | RawBlockQuote [RawBlock]
+   | RawCodeBlock (Maybe Text) Text
+-  | RawImage Text Text
++  | RawImage Text Text (Maybe (Int, Int))
++    -- ^ Src, alt, and optional pixel dimensions — 'Just' only from a
++    -- source format that states them explicitly (DOCX's @wp:extent@).
+   | RawHorizontalRule
+   deriving Show
+ 
+@@ -58,52 +77,65 @@ data RawInline
+ type RawCell = [RawInline]
+ type RawRow  = [RawCell]
+ 
+-toBlock :: RawBlock -> Either MirrorError Block
+-toBlock (RawHeading levelInt rawInlines) = do
+-  level   <- note (ErrParse (JsonSchemaViolation (badHeadingLevel levelInt))) (headingLevelFromInt levelInt)
+-  inlines <- traverse toInline rawInlines
+-  pure (Heading level inlines)
+-toBlock (RawParagraph rawInlines) =
+-  Paragraph <$> traverse toInline rawInlines
+-toBlock (RawList kindText rawItems) = do
+-  kind    <- note (ErrParse (JsonSchemaViolation (badListKind kindText))) (listKindFromText kindText)
+-  items   <- traverse toListItem rawItems
+-  itemsNE <- note (ErrValidation EmptyList) (nonEmpty items)
+-  pure (BulletList kind itemsNE)
+-toBlock (RawTable rawHeader rawRows) = do
+-  header <- traverse toRawCells rawHeader
+-  rows   <- traverse toRawCells rawRows
+-  mkTable header rows
++-- | Every recursive descent below is depth-checked at entry via
++-- 'checkRawDepth', and every recursive call passes @depth + 1@ —
++-- applied uniformly across every constructor capable of nesting
++-- ('RawBlockQuote', 'RawList' items, 'RawTable' cells, 'RawEmphasis'\/
++-- 'RawStrong'\/'RawLink' in 'toInline'), not just the ones an author
++-- happened to think of first.
++toBlock :: Int -> RawBlock -> Either MirrorError Block
++toBlock depth raw = do
++  checkRawDepth depth
++  case raw of
++    RawHeading levelInt rawInlines -> do
++      level   <- note (ErrValidation (InvalidHeadingLevel levelInt)) (headingLevelFromInt levelInt)
++      inlines <- traverse (toInline (depth + 1)) rawInlines
++      pure (Heading level inlines)
++    RawParagraph rawInlines ->
++      Paragraph <$> traverse (toInline (depth + 1)) rawInlines
++    RawList kindText rawItems -> do
++      kind    <- note (ErrParse (JsonSchemaViolation (badListKind kindText))) (listKindFromText kindText)
++      items   <- traverse (toListItem (depth + 1)) rawItems
++      itemsNE <- note (ErrValidation EmptyList) (nonEmpty items)
++      pure (BulletList kind itemsNE)
++    RawTable rawHeader rawRows -> do
++      header <- traverse (toRawCells (depth + 1)) rawHeader
++      rows   <- traverse (toRawCells (depth + 1)) rawRows
++      mkTable header rows
++    RawBlockQuote rawBlocks -> do
++      blocks   <- traverse (toBlock (depth + 1)) rawBlocks
++      blocksNE <- note (ErrValidation EmptyBlockQuote) (nonEmpty blocks)
++      pure (BlockQuote blocksNE)
++    RawCodeBlock rawLanguage code -> do
++      language <- traverse toLanguageTag rawLanguage
++      pure (CodeBlock language code)
++    RawImage src alt dims -> do
++      url <- mkImageUrl src
++      pure (Image url alt dims)
++    RawHorizontalRule -> pure HorizontalRule
+   where
+-    toRawCells = traverse (traverse toInline)
+-toBlock (RawBlockQuote rawBlocks) = do
+-  blocks   <- traverse toBlock rawBlocks
+-  blocksNE <- note (ErrValidation EmptyBlockQuote) (nonEmpty blocks)
+-  pure (BlockQuote blocksNE)
+-toBlock (RawCodeBlock rawLanguage code) = do
+-  language <- traverse toLanguageTag rawLanguage
+-  pure (CodeBlock language code)
+-toBlock (RawImage src alt) = do
+-  url <- mkUrl src
+-  pure (Image url alt)
+-toBlock RawHorizontalRule = pure HorizontalRule
++    toRawCells d = traverse (traverse (toInline d))
+ 
+-toListItem :: [RawBlock] -> Either MirrorError ListItem
+-toListItem rawBlocks = ListItem <$> traverse toBlock rawBlocks
++toListItem :: Int -> [RawBlock] -> Either MirrorError ListItem
++toListItem depth rawBlocks = ListItem <$> traverse (toBlock depth) rawBlocks
+ 
+ toLanguageTag :: Text -> Either MirrorError LanguageTag
+ toLanguageTag t = note (ErrValidation (InvalidLanguageTag t)) (languageTagFromText t)
+ 
+-toInline :: RawInline -> Either MirrorError Inline
+-toInline (RawText t)       = pure (Text t)
+-toInline (RawEmphasis xs)  = Emphasis <$> traverse toInline xs
+-toInline (RawStrong xs)    = Strong <$> traverse toInline xs
+-toInline (RawLink href xs) = Link <$> mkUrl href <*> traverse toInline xs
+-toInline (RawInlineCode t) = pure (InlineCode t)
+-toInline RawSoftBreak      = pure SoftBreak
+-
+-badHeadingLevel :: Int -> Text
+-badHeadingLevel n = "heading \"level\" must be an integer from 1 to 6, got " <> Text.pack (show n)
++toInline :: Int -> RawInline -> Either MirrorError Inline
++toInline depth raw = do
++  checkRawDepth depth
++  case raw of
++    RawText t       -> pure (Plain t)
++    RawEmphasis xs  -> Emphasis <$> traverse (toInline (depth + 1)) xs
++    RawStrong xs    -> Strong <$> traverse (toInline (depth + 1)) xs
++    RawLink href xs -> do
++      url       <- mkUrl href
++      inlines   <- traverse (toInline (depth + 1)) xs
++      inlinesNE <- note (ErrValidation EmptyLinkText) (nonEmpty inlines)
++      pure (Link url inlinesNE)
++    RawInlineCode t -> pure (InlineCode t)
++    RawSoftBreak    -> pure SoftBreak
+ 
+ badListKind :: Text -> Text
+ badListKind t = "list \"kind\" must be \"ordered\" or \"unordered\", got " <> t
+diff --git a/src/Mirror/Error.hs b/src/Mirror/Error.hs
+index 26c7d81..05d85a1 100644
+--- a/src/Mirror/Error.hs
++++ b/src/Mirror/Error.hs
+@@ -75,6 +75,26 @@ data ParseError
+   | DocxUnsupportedImageFormat Text
+     -- ^ An embedded image's file extension isn't one of the closed,
+     -- recognised set (§7) Mirror knows how to embed as a data URI.
++  | DocxPartTooLarge Text Integer Integer
++    -- ^ Part name, its declared uncompressed size, and the configured
++    -- ceiling it exceeded. Reported before the part is fully
++    -- decompressed, guarding against a small, maliciously crafted zip
++    -- entry expanding into an unbounded amount of memory (a "zip
++    -- bomb") — the same "resource bound, checked, not assumed"
++    -- discipline already applied to recursive-structure nesting.
++  | DocxTooManyImages Int Int
++    -- ^ Number of distinct embedded images found, and the configured
++    -- ceiling — guards against a document referencing an unbounded
++    -- number of images each requiring a full in-memory base64 copy.
++  | ExcessiveNestingDepth Int
++    -- ^ A parsed document's block\/inline structure exceeded Mirror's
++    -- nesting-depth ceiling /before/ rendering — checked at parse time
++    -- (unlike 'Mirror.Error.RenderError''s 'UnrenderableNestingDepth',
++    -- which guards the render stage) because 'Mirror.Document.Raw'
++    -- and the Markdown inline grammar both recursively materialise a
++    -- document's full tree and are each independently capable of
++    -- exhausting the stack on adversarial input, prior to any
++    -- rendering step running at all.
+   deriving (Eq, Show)
+ 
+ data ValidationError
+@@ -98,9 +118,27 @@ data ValidationError
+   | MismatchedTableColumns Int Int
+     -- ^ Canonical (first-row) width, and the width of the offending row.
+   | InvalidUrl Text
++    -- ^ Not a syntactically valid URI at all.
++  | DisallowedUrlScheme Text
++    -- ^ A syntactically valid URI whose scheme is outside Mirror's
++    -- closed allow-list (§3) — kept distinct from 'InvalidUrl' because
++    -- "malformed" and "syntactically fine but forbidden" are different
++    -- facts a user needs to act on differently, the same distinction
++    -- 'EmptyTable'\/'EmptyTableRow' already draws for tables.
+   | InvalidLanguageTag Text
+     -- ^ A code block named a fenced-code language outside Mirror's
+     -- closed, recognised set (§3).
++  | InvalidHeadingLevel Int
++    -- ^ A heading's level fell outside 1..6. Format-independent: every
++    -- source's raw heading level is checked identically by
++    -- 'Mirror.Document.Raw.toBlock', so this is never tagged as a
++    -- JSON-, Markdown-, or DOCX-specific failure even though only
++    -- JSON's free-form @"level"@ field can produce it today.
++  | EmptyLinkText
++    -- ^ A hyperlink whose visible text is empty. Unlike a paragraph or
++    -- a table cell, an anchor with no content is not "ordinary,
++    -- possibly-empty data" — it is both inaccessible (no accessible
++    -- name for assistive technology) and unusable (nothing to click).
+   deriving (Eq, Show)
+ 
+ -- | Failures possible while turning a validated 'Mirror.Document.Document'
+@@ -159,6 +197,14 @@ renderParseError = \case
+     "list numbering id \"" <> numId <> "\" has no resolvable format in the document's numbering part"
+   DocxUnsupportedImageFormat ext ->
+     "embedded image format \"" <> ext <> "\" is not one of Mirror's recognised set"
++  DocxPartTooLarge part size limit ->
++    "DOCX part \"" <> part <> "\" is " <> tshow size <> " bytes uncompressed, exceeding the "
++      <> tshow limit <> "-byte limit"
++  DocxTooManyImages count limit ->
++    "DOCX document references " <> tshow count <> " embedded images, exceeding the "
++      <> tshow limit <> "-image limit"
++  ExcessiveNestingDepth d ->
++    "nesting depth " <> tshow d <> " exceeds Mirror's limit while parsing the document"
+ 
+ renderValidationError :: ValidationError -> Text
+ renderValidationError = \case
+@@ -170,8 +216,11 @@ renderValidationError = \case
+   EmptyBlockQuote    -> "a block quote must contain at least one block"
+   MismatchedTableColumns expected got ->
+     "table row has " <> tshow got <> " columns, expected " <> tshow expected
+-  InvalidUrl u         -> "not a valid URL: " <> u
+-  InvalidLanguageTag t -> "not a recognised code-block language: " <> t
++  InvalidUrl u           -> "not a valid URL: " <> u
++  DisallowedUrlScheme s  -> "URL scheme \"" <> s <> "\" is not permitted (only http, https, mailto)"
++  InvalidLanguageTag t   -> "not a recognised code-block language: " <> t
++  InvalidHeadingLevel n  -> "heading level must be an integer from 1 to 6, got " <> tshow n
++  EmptyLinkText          -> "a link must have non-empty visible text"
+ 
+ renderRenderError :: RenderError -> Text
+ renderRenderError = \case
+diff --git a/src/Mirror/Parser/Docx.hs b/src/Mirror/Parser/Docx.hs
+index d84ef19..b5b28ca 100644
+--- a/src/Mirror/Parser/Docx.hs
++++ b/src/Mirror/Parser/Docx.hs
+@@ -55,14 +55,15 @@ import Control.Exception (SomeException, evaluate, try)
+ import Control.Monad.Trans.Except (ExceptT (..))
+ import qualified Data.ByteString.Base64 as Base64
+ import qualified Data.ByteString.Lazy as BSL
+-import Data.List (nub)
+ import Data.Map.Strict (Map)
+ import qualified Data.Map.Strict as Map
++import qualified Data.Set as Set
+ import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
+ import Data.Text (Text)
+ import qualified Data.Text as Text
+ import qualified Data.Text.Encoding as TE
+-import Codec.Archive.Zip (Archive, findEntryByPath, fromEntry, toArchive)
++import Text.Read (readMaybe)
++import Codec.Archive.Zip (Archive, Entry, eUncompressedSize, findEntryByPath, fromEntry, toArchive)
+ import qualified Text.XML as XML
+ import Text.XML (Node (NodeElement), Name (..), def, elementName, parseLBS)
+ import Text.XML.Cursor
+@@ -130,24 +131,50 @@ parseDocx path raw = do
+   numFmts     <- ExceptT (pure (maybe (Right Map.empty) parseNumberingFormats numBytes))
+   imageData   <- loadImageDataUris path archive rels docCursor
+   rawBlocks   <- ExceptT (pure (bodyBlocksFromCursors imageData rels numFmts (bodyChildCursors docCursor)))
+-  finalBlocks <- ExceptT (pure (traverse toBlock rawBlocks))
++  finalBlocks <- ExceptT (pure (traverse (toBlock 0) rawBlocks))
+   ExceptT (pure (mkDocument Nothing finalBlocks))
+ 
++-- | A small, crafted zip entry can expand to an arbitrarily large
++-- amount of memory on decompression (a "zip bomb"). @zip-archive@
++-- exposes each entry's /declared/ uncompressed size without
++-- decompressing it, so that size is checked — and rejected, named,
++-- before any decompression happens — rather than assumed trustworthy.
++-- The limit is generous for any legitimate document part (the largest
++-- realistic @document.xml@ or embedded image) while still bounding
++-- worst-case memory use to a known, small multiple of this figure.
++maxDecompressedPartBytes :: Integer
++maxDecompressedPartBytes = 64 * 1024 * 1024 -- 64 MiB, per part
++
+ -- | Extracts one zip entry's bytes if present, forcing full
+ -- evaluation (via 'BSL.length') at the point of extraction — exactly
+ -- where a corrupt archive's decompression failure would throw —
+ -- rather than leaving that force to happen lazily on some later,
+--- unrelated line.
++-- unrelated line. The entry's declared size is checked, and rejected
++-- as 'DocxPartTooLarge', strictly before that decompressing force.
+ loadPart :: FilePath -> Archive -> Text -> ExceptT MirrorError IO (Maybe BSL.ByteString)
+-loadPart archivePath archive partName = ExceptT $ do
+-  outcome <- try (evaluate forced)
+-  pure $ case (outcome :: Either SomeException (Maybe BSL.ByteString)) of
+-    Left _        -> Left (ErrParse (DocxNotAZipArchive archivePath))
+-    Right maybeBs -> Right maybeBs
++loadPart archivePath archive partName =
++  case findEntryByPath (Text.unpack partName) archive of
++    Nothing -> ExceptT (pure (Right Nothing))
++    Just e
++      | declaredSize e > maxDecompressedPartBytes ->
++          ExceptT (pure (Left (ErrParse (DocxPartTooLarge partName (declaredSize e) maxDecompressedPartBytes))))
++      | otherwise -> ExceptT $ do
++          outcome <- try (evaluate (forced e))
++          pure $ case (outcome :: Either SomeException BSL.ByteString) of
++            Left _   -> Left (ErrParse (DocxNotAZipArchive archivePath))
++            Right bs -> Right (Just bs)
+   where
+-    forced = case findEntryByPath (Text.unpack partName) archive of
+-      Nothing -> Nothing
+-      Just e  -> let bytes = fromEntry e in BSL.length bytes `seq` Just bytes
++    -- 'eUncompressedSize''s exact numeric type is an internal
++    -- @zip-archive@ detail that has varied across versions ('Word32'
++    -- in most current releases); converted explicitly via
++    -- 'fromIntegral' rather than assumed to unify directly with
++    -- 'Integer', so this comparison is robust to whichever the pinned
++    -- version actually uses.
++    declaredSize :: Entry -> Integer
++    declaredSize = fromIntegral . eUncompressedSize
++
++    forced :: Entry -> BSL.ByteString
++    forced e = let bytes = fromEntry e in BSL.length bytes `seq` bytes
+ 
+ requirePart :: FilePath -> Archive -> Text -> ExceptT MirrorError IO BSL.ByteString
+ requirePart archivePath archive partName = do
+@@ -216,9 +243,19 @@ parseNumberingFormats bytes = do
+ -- pure map access instead of touching the zip archive again.
+ --------------------------------------------------------------------------
+ 
++-- | Bounds the number of distinct embedded images a single document
++-- may reference — each one is fully base64-encoded into memory
++-- (§7), so an unbounded count is itself a resource-exhaustion vector
++-- independent of any single part's size.
++maxEmbeddedImages :: Int
++maxEmbeddedImages = 500
++
+ loadImageDataUris :: FilePath -> Archive -> Map Text Text -> Cursor -> ExceptT MirrorError IO (Map Text Text)
+ loadImageDataUris archivePath archive rels docCursor = do
+-  let rids = nub (mapMaybe (listToMaybe . attribute (officeRelNs "embed")) (docCursor $// element (drawingMainNs "blip")))
++  let rids = Set.toList (Set.fromList (mapMaybe (listToMaybe . attribute (officeRelNs "embed")) (docCursor $// element (drawingMainNs "blip"))))
++  () <- ExceptT (pure (if length rids > maxEmbeddedImages
++                         then Left (ErrParse (DocxTooManyImages (length rids) maxEmbeddedImages))
++                         else Right ()))
+   pairs <- traverse (\rid -> (,) rid <$> loadOneImageDataUri archivePath archive rels rid) rids
+   pure (Map.fromList pairs)
+ 
+@@ -356,13 +393,34 @@ drawingToRawImage imageData drawingCursor = do
+   blipCursor <- note1 "w:drawing has no a:blip" (listToMaybe (drawingCursor $// element (drawingMainNs "blip")))
+   rid        <- note1 "a:blip missing r:embed" (listToMaybe (attribute (officeRelNs "embed") blipCursor))
+   dataUri    <- maybe (Left (ErrParse (DocxUnresolvedRelationship rid))) Right (Map.lookup rid imageData)
+-  let docPrCursors = drawingCursor $// element (wordDrawingNs "docPr")
++  let docPrCursors  = drawingCursor $// element (wordDrawingNs "docPr")
+       altCandidates = concatMap (\c -> unqualifiedAttr "descr" c ++ unqualifiedAttr "title" c) docPrCursors
+-      altText = fromMaybe "" (listToMaybe altCandidates)
+-  pure (RawImage dataUri altText)
++      altText       = fromMaybe "" (listToMaybe altCandidates)
++      dims          = extentDimensions drawingCursor
++  pure (RawImage dataUri altText dims)
+   where
+     note1 msg = maybe (Left (ErrParse (DocxMalformedXml "word/document.xml" msg))) Right
+ 
++-- | @wp:extent@ states a drawing's rendered size as @cx@\/@cy@
++-- attributes in EMUs (English Metric Units; 9525 EMU per CSS pixel at
++-- 96 DPI) — read here so the renderer can emit @width@\/@height@ and
++-- avoid layout shift wherever DOCX already states the real size,
++-- rather than discarding a dimension the source format provides.
++-- 'Nothing' (never a crash) if the element, either attribute, or the
++-- attribute's numeric parse is absent — an image without a stated
++-- extent is unusual but not malformed.
++extentDimensions :: Cursor -> Maybe (Int, Int)
++extentDimensions drawingCursor = do
++  extentCursor <- listToMaybe (drawingCursor $// element (wordDrawingNs "extent"))
++  cxText       <- listToMaybe (unqualifiedAttr "cx" extentCursor)
++  cyText       <- listToMaybe (unqualifiedAttr "cy" extentCursor)
++  cxEmu        <- readMaybe (Text.unpack cxText)
++  cyEmu        <- readMaybe (Text.unpack cyText)
++  pure (emuToPx cxEmu, emuToPx cyEmu)
++  where
++    emuToPx :: Int -> Int
++    emuToPx emu = max 1 (emu `div` 9525)
++
+ --------------------------------------------------------------------------
+ -- Tables: w:tbl / w:tr / w:tc. Never treated as having a header row —
+ -- DOCX has no equivalent of a Markdown table's delimiter row to
+diff --git a/src/Mirror/Parser/Json.hs b/src/Mirror/Parser/Json.hs
+index a03fad2..af2ef97 100644
+--- a/src/Mirror/Parser/Json.hs
++++ b/src/Mirror/Parser/Json.hs
+@@ -56,7 +56,7 @@ parseJson bytes = do
+   (rawTitle, rawBody) <- first (ErrParse . JsonSchemaViolation . Text.pack)
+                                 (parseEither rawDocumentParser value)
+   title  <- traverse mkNonEmptyText rawTitle
+-  blocks <- traverse toBlock rawBody
++  blocks <- traverse (toBlock 0) rawBody
+   mkDocument title blocks
+ 
+ --------------------------------------------------------------------------
+@@ -99,9 +99,11 @@ rawBlockParser = withObject "block" $ \o -> do
+       code     <- o .: "code"
+       pure (RawCodeBlock language code)
+     "image" -> do
+-      src <- o .: "src"
+-      alt <- o .: "alt"
+-      pure (RawImage src alt)
++      src    <- o .: "src"
++      alt    <- o .: "alt"
++      width  <- o .:? "width"
++      height <- o .:? "height"
++      pure (RawImage src alt ((,) <$> width <*> height))
+     "rule" -> pure RawHorizontalRule
+     other  -> fail ("unrecognised block \"type\": " <> Text.unpack other)
+ 
+diff --git a/src/Mirror/Parser/Markdown.hs b/src/Mirror/Parser/Markdown.hs
+index 8451a7d..79a1a30 100644
+--- a/src/Mirror/Parser/Markdown.hs
++++ b/src/Mirror/Parser/Markdown.hs
+@@ -59,7 +59,7 @@ import Mirror.Parser.Markdown.Inline (inlinesFromSubstring)
+ -- table) — the same checks every other source is held to (§3).
+ parseMarkdown :: Text -> Either MirrorError Document
+ parseMarkdown src = do
+-  blocks <- traverse toBlock (blocksFromLines (toLines src))
++  blocks <- traverse (toBlock 0) (blocksFromLines (toLines src))
+   mkDocument Nothing blocks
+ 
+ toLines :: Text -> [Text]
+@@ -224,7 +224,7 @@ blocksFromLines (l : ls)
+   = RawHeading levelInt (inlinesFromSubstring titleText) : blocksFromLines ls
+ 
+   | Just (url, alt) <- imageLine l
+-  = RawImage url alt : blocksFromLines ls
++  = RawImage url alt Nothing : blocksFromLines ls
+ 
+   | Just firstUnwrapped <- blockQuotePrefix l
+   = let (quoteLines, rest) = spanBlockQuote ls
+diff --git a/src/Mirror/Parser/Markdown/Inline.hs b/src/Mirror/Parser/Markdown/Inline.hs
+index 61aab20..5d1c705 100644
+--- a/src/Mirror/Parser/Markdown/Inline.hs
++++ b/src/Mirror/Parser/Markdown/Inline.hs
+@@ -46,29 +46,51 @@ import Mirror.Document.Raw
+ 
+ type Parser = Parsec Void Text
+ 
+--- | Total. See the module note for why: 'inlineElementP''s ultimate
+--- fallback, 'literalCharP', consumes exactly one character
+--- unconditionally, so 'many inlineElementP' can only stop at true end
+--- of input, at which point the trailing 'eof' always succeeds. The
+--- 'Left' branch below is consequently expected to be unreachable; it
+--- is handled with a safe, non-crashing fallback (the substring as a
+--- single literal run of text) rather than assumed away with an
+--- unsafe function — Megaparsec's own type honestly admits failure,
+--- and this project does not paper over that with partiality (§0,
+--- rule 1), even for a case reasoned to be impossible.
++-- | The public entry point always starts a fresh substring at depth
++-- zero. See 'inlinesFromSubstringAt' for the depth-bounded recursion
++-- this delegates to.
+ inlinesFromSubstring :: Text -> [RawInline]
+-inlinesFromSubstring sub = case parse (many inlineElementP <* eof) "" sub of
+-  Right inlines -> mergeAdjacentText inlines
+-  Left _        -> [RawText sub]
++inlinesFromSubstring = inlinesFromSubstringAt 0
+ 
+-inlineElementP :: Parser RawInline
+-inlineElementP = choice
+-  [ try linkP
++-- | Total, for the reason 'inlinesFromSubstring' always was:
++-- 'inlineElementP''s ultimate fallback, 'literalCharP', consumes
++-- exactly one character unconditionally, so 'many (inlineElementP _)'
++-- can only stop at true end of input, at which point the trailing
++-- 'eof' always succeeds; the 'Left' branch below is consequently
++-- expected to be unreachable and is handled with a safe fallback
++-- rather than an unsafe function, per this project's ban on
++-- partiality (§0, rule 1).
++--
++-- Depth-bounded in addition, and for a distinct reason: 'strongP',
++-- 'emphasisP', and 'linkP' each recursively re-parse a captured
++-- substring (so @[**bold**](url)@ nests correctly), and nothing about
++-- Markdown's grammar limits how deep an author — or an adversary
++-- crafting input specifically to exhaust the stack — can nest
++-- @**@\/@*@\/@[...]\(...\)@ delimiters. Past 'maxInlineNestingDepth',
++-- further nested markup is deliberately not expanded further; the
++-- remaining substring is returned as one literal text run instead of
++-- being recursively reparsed. This keeps the grammar total (matching
++-- the note above) while eliminating the stack-exhaustion risk, at the
++-- cost of degrading — never crashing — on pathologically deep input
++-- that no legitimate document would ever produce.
++maxInlineNestingDepth :: Int
++maxInlineNestingDepth = 64
++
++inlinesFromSubstringAt :: Int -> Text -> [RawInline]
++inlinesFromSubstringAt depth sub
++  | depth > maxInlineNestingDepth = [RawText sub]
++  | otherwise = case parse (many (inlineElementP depth) <* eof) "" sub of
++      Right inlines -> mergeAdjacentText inlines
++      Left _        -> [RawText sub]
++
++inlineElementP :: Int -> Parser RawInline
++inlineElementP depth = choice
++  [ try (linkP depth)
+   , try codeSpanP
+-  , try (strongP '*')
+-  , try (strongP '_')
+-  , try (emphasisP '*')
+-  , try (emphasisP '_')
++  , try (strongP depth '*')
++  , try (strongP depth '_')
++  , try (emphasisP depth '*')
++  , try (emphasisP depth '_')
+   , try escapedCharP
+   , softBreakP
+   , literalCharP
+@@ -101,35 +123,35 @@ codeSpanP = do
+ -- | @**strong**@ or @__strong__@. See the module note: the search for
+ -- the closing pair is a plain character scan, not a recursive
+ -- invocation of 'inlineElementP'.
+-strongP :: Char -> Parser RawInline
+-strongP delim = do
++strongP :: Int -> Char -> Parser RawInline
++strongP depth delim = do
+   _   <- count 2 (char delim)
+   raw <- rawUntil (count 2 (char delim))
+-  pure (RawStrong (inlinesFromSubstring raw))
++  pure (RawStrong (inlinesFromSubstringAt (depth + 1) raw))
+ 
+ -- | @*emphasis*@ or @_emphasis_@. Combined @***strong and emphasis***@
+ -- in one delimiter run is not specially resolved — write
+ -- @**_this_**@ instead — a deliberate simplification short of full
+ -- CommonMark delimiter-run precedence, which this module does not
+ -- attempt to reproduce.
+-emphasisP :: Char -> Parser RawInline
+-emphasisP delim = do
++emphasisP :: Int -> Char -> Parser RawInline
++emphasisP depth delim = do
+   _   <- char delim
+   raw <- rawUntil (char delim)
+-  pure (RawEmphasis (inlinesFromSubstring raw))
++  pure (RawEmphasis (inlinesFromSubstringAt (depth + 1) raw))
+ 
+ -- | Link text is recursively parsed (so @[**bold** link](url)@
+ -- works); the destination is taken verbatim and validated later, by
+ -- the same 'Mirror.Document.mkUrl' every other source uses (§3).
+ -- A destination containing a literal, unescaped @)@ is not supported —
+ -- wrap it in a shorter link or accept the simplification.
+-linkP :: Parser RawInline
+-linkP = do
++linkP :: Int -> Parser RawInline
++linkP depth = do
+   _       <- char '['
+   altText <- rawUntil (char ']')
+   _       <- char '('
+   url     <- rawUntil (char ')')
+-  pure (RawLink url (inlinesFromSubstring altText))
++  pure (RawLink url (inlinesFromSubstringAt (depth + 1) altText))
+ 
+ -- | The one place 'many'\/'eof' is not the terminating combinator:
+ -- 'literalCharP' is tried only after every special construct above
+diff --git a/src/Mirror/Pipeline.hs b/src/Mirror/Pipeline.hs
+index c261821..e682393 100644
+--- a/src/Mirror/Pipeline.hs
++++ b/src/Mirror/Pipeline.hs
+@@ -23,6 +23,7 @@ module Mirror.Pipeline
+ import Control.Exception (IOException, try)
+ import Control.Monad.Trans.Except (ExceptT (..), except, runExceptT)
+ import qualified Data.ByteString.Lazy as BSL
++import Data.Maybe (fromMaybe)
+ import Data.Text (Text)
+ import qualified Data.Text as Text
+ import qualified Data.Text.IO as TIO
+@@ -59,7 +60,7 @@ mkPipelineConfig input cssPath outPath = do
+   pure PipelineConfig
+     { cfgInputPath      = input
+     , cfgInputFormat    = fmt
+-    , cfgOutputPath     = maybe (replaceExtension input ".html") id outPath
++    , cfgOutputPath     = fromMaybe (replaceExtension input ".html") outPath
+     , cfgStylesheetPath = cssPath
+     }
+ 
+diff --git a/src/Mirror/Renderer/Html.hs b/src/Mirror/Renderer/Html.hs
+index ea522a8..edf2665 100644
+--- a/src/Mirror/Renderer/Html.hs
++++ b/src/Mirror/Renderer/Html.hs
+@@ -18,6 +18,7 @@ module Mirror.Renderer.Html (renderDocument) where
+ 
+ import Data.List.NonEmpty (toList)
+ import Data.Text (Text)
++import qualified Data.Text as Text
+ 
+ import Mirror.Document
+ import Mirror.Error
+@@ -37,15 +38,44 @@ checkDepth depth
+ -- | Takes the resolved stylesheet href explicitly rather than
+ -- hardcoding one, so "Mirror.Pipeline" controls whether the emitted
+ -- page links the embedded default or a user-supplied file.
++--
++-- Emits the baseline every page needs regardless of source format
++-- (charset, viewport, @lang@, a skip link, and a single @<main>@
++-- landmark) and renders 'documentTitle', when present, as the page's
++-- @<h1>@ — not only into @<title>@ — so the heading a sighted or
++-- assistive-technology reader actually sees matches the title a
++-- browser tab shows. Scope note: Mirror does not yet renumber or
++-- reject a document whose own content also contains a top-level
++-- heading when a title is present; that stronger guarantee ("exactly
++-- one @<h1>@ no matter what the source document contains") is a
++-- follow-up validation rule, not silently assumed here.
++--
++-- @lang@ is fixed at @"en"@: Mirror has no per-document signal for
++-- source language today (Markdown, JSON, and DOCX none declare one it
++-- reads), so this is a stated, narrow default rather than a guess —
++-- a future @--lang@ pipeline option is the natural place to make it
++-- caller-controlled.
+ renderDocument :: Text -> Document -> Either MirrorError Text
+ renderDocument cssHref doc = do
+   bodyBlocks <- traverse (blockToHtml 0) (toList (documentBlocks doc))
+   pure ("<!DOCTYPE html>\n" <> renderHtml (page bodyBlocks))
+   where
+-    page bodyBlocks = tag "html" []
+-      [ tag "head" [] [titleTag, stylesheetLink]
+-      , tag "body" [] bodyBlocks
++    page bodyBlocks = tag "html" [attr "lang" "en"]
++      [ tag "head" []
++          [ selfClosingTag "meta" [attr "charset" "UTF-8"]
++          , selfClosingTag "meta"
++              [attr "name" "viewport", attr "content" "width=device-width, initial-scale=1"]
++          , titleTag
++          , stylesheetLink
++          ]
++      , tag "body" []
++          [ skipLink
++          , tag "main" [attr "id" "main"] (titleHeading <> bodyBlocks)
++          ]
+       ]
++    skipLink = tag "a" [attr "class" "skip-link", attr "href" "#main"] [escape "Skip to content"]
++    titleHeading =
++      maybe [] (\t -> [tag "h1" [] [escape (unNonEmptyText t)]]) (documentTitle doc)
+     titleTag = tag "title" []
+       [ maybe (escape "Untitled") (escape . unNonEmptyText) (documentTitle doc) ]
+     stylesheetLink = selfClosingTag "link"
+@@ -71,8 +101,8 @@ blockToHtml depth block = do
+       tag "blockquote" [] <$> traverse (blockToHtml (depth + 1)) (toList blocks)
+     CodeBlock lang code ->
+       pure (tag "pre" [] [ tag "code" (langClass lang) [ escape code ] ])
+-    Image src alt ->
+-      pure (selfClosingTag "img" [ attr "src" (unUrl src), attr "alt" alt ])
++    Image src alt dims ->
++      pure (selfClosingTag "img" (imageAttrs src alt dims))
+     HorizontalRule ->
+       pure (selfClosingTag "hr" [])
+ 
+@@ -80,6 +110,20 @@ headingTagName :: HeadingLevel -> Text
+ headingTagName = \case
+   H1 -> "h1"; H2 -> "h2"; H3 -> "h3"; H4 -> "h4"; H5 -> "h5"; H6 -> "h6"
+ 
++-- | @width@\/@height@ are included only when 'Image' carries a known
++-- pixel size (today: DOCX's @wp:extent@) — omitting them, rather than
++-- guessing, when the source format genuinely doesn't state a size.
++-- @loading="lazy"@ is unconditional: nothing here is ever the page's
++-- single hero/LCP image the way a hand-authored page might have one,
++-- so eager-loading has no benefit to trade away.
++imageAttrs :: Url -> Text -> Maybe (Int, Int) -> [(Text, Text)]
++imageAttrs src alt dims =
++  [ attr "src" (unUrl src), attr "alt" alt, attr "loading" "lazy" ]
++    <> maybe [] (\(w, h) -> [attr "width" (tshow w), attr "height" (tshow h)]) dims
++
++tshow :: Show a => a -> Text
++tshow = Text.pack . show
++
+ listTagName :: ListKind -> Text
+ listTagName = \case Ordered -> "ol"; Unordered -> "ul"
+ 
+@@ -92,10 +136,10 @@ inlinesToHtml depth inlines = do
+ -- 'blockToHtml' is exhaustive over 'Block'.
+ inlineToHtml :: Int -> Inline -> Either MirrorError (Html 'Escaped)
+ inlineToHtml depth inl = case inl of
+-  Text t       -> pure (escape t)
++  Plain t      -> pure (escape t)
+   Emphasis xs  -> tag "em" [] <$> inlinesToHtml (depth + 1) xs
+   Strong xs    -> tag "strong" [] <$> inlinesToHtml (depth + 1) xs
+-  Link url xs  -> tag "a" [attr "href" (unUrl url)] <$> inlinesToHtml (depth + 1) xs
++  Link url xs  -> tag "a" [attr "href" (unUrl url)] <$> inlinesToHtml (depth + 1) (toList xs)
+   InlineCode t -> pure (tag "code" [] [ escape t ])
+   SoftBreak    -> pure (selfClosingTag "br" [])
+ 
+@@ -116,7 +160,9 @@ tableToHtml depth table = do
+     rowToHtml cellTag (TableRow cells) =
+       tag "tr" [] <$> traverse (cellToHtml cellTag) (toList cells)
+     cellToHtml cellTag cellInlines =
+-      tag cellTag [] <$> inlinesToHtml (depth + 1) cellInlines
++      tag cellTag (cellAttrs cellTag) <$> inlinesToHtml (depth + 1) cellInlines
++    cellAttrs "th" = [attr "scope" "col"]
++    cellAttrs _    = []
+ 
+ langClass :: Maybe LanguageTag -> [(Text, Text)]
+ langClass = maybe [] (\l -> [attr "class" ("language-" <> languageSlug l)])
+diff --git a/test/Spec.hs b/test/Spec.hs
+index b98cf2c..7ad06cb 100644
+--- a/test/Spec.hs
++++ b/test/Spec.hs
+@@ -15,11 +15,13 @@ import Mirror.Html
+ import Mirror.Parser.Docx (parseDocx)
+ import Mirror.Parser.Json (parseJson)
+ import Mirror.Parser.Markdown (parseMarkdown)
++import Mirror.Renderer.Html (renderDocument)
+ 
+ main :: IO ()
+ main = hspec $ do
+   documentSpec
+   htmlSpec
++  rendererSpec
+   markdownSpec
+   docxSpec
+   jsonSpec
+@@ -41,11 +43,11 @@ documentSpec = describe "Mirror.Document smart constructors" $ do
+     mkTable Nothing [[]] `shouldBe` Left (ErrValidation EmptyTableRow)
+ 
+   it "reports a ragged table with the canonical and offending widths" $
+-    mkTable Nothing [[[Text "a"]], [[Text "b"], [Text "c"]]]
++    mkTable Nothing [[[Plain "a"]], [[Plain "b"], [Plain "c"]]]
+       `shouldBe` Left (ErrValidation (MismatchedTableColumns 1 2))
+ 
+   it "accepts a rectangular table and reports its column count" $
+-    case mkTable (Just [[Text "H"]]) [[[Text "a"]]] of
++    case mkTable (Just [[Plain "H"]]) [[[Plain "a"]]] of
+       Right (TableBlock t) -> tableColumnCount t `shouldBe` 1
+       other                -> expectationFailure ("expected a table, got " <> show other)
+ 
+@@ -59,7 +61,7 @@ documentSpec = describe "Mirror.Document smart constructors" $ do
+ 
+   prop "any positive number of equal-width rows forms a valid table of that width" $
+     \(Positive width) (Positive rowCount) ->
+-      let row = replicate width [Text "x"]
++      let row = replicate width [Plain "x"]
+       in case mkTable Nothing (replicate rowCount row) of
+            Right (TableBlock t) -> tableColumnCount t == width
+            _                    -> False
+@@ -67,7 +69,7 @@ documentSpec = describe "Mirror.Document smart constructors" $ do
+   prop "two rows of differing widths are always rejected as ragged, never accepted" $
+     \(Positive w1) (Positive w2) ->
+       w1 /= w2 ==>
+-        case mkTable Nothing [replicate w1 [Text "x"], replicate w2 [Text "x"]] of
++        case mkTable Nothing [replicate w1 [Plain "x"], replicate w2 [Plain "x"]] of
+           Left (ErrValidation (MismatchedTableColumns _ _)) -> True
+           _                                                 -> False
+ 
+@@ -95,6 +97,75 @@ htmlSpec = describe "Mirror.Html escaping" $ do
+   prop "never leaves an unescaped <, >, \" or ' in the output" $ \s ->
+     Text.all (`notElem` ("<>\"'" :: String)) (renderHtml (escape (Text.pack s)))
+ 
++--------------------------------------------------------------------------
++-- Mirror.Renderer.Html: previously zero coverage at all -- in
++-- particular the one invariant this module's own Haddock claims
++-- (bounded nesting fails cleanly rather than exhausting the stack)
++-- had never been exercised by a test.
++--------------------------------------------------------------------------
++
++rendererSpec :: Spec
++rendererSpec = describe "Mirror.Renderer.Html" $ do
++  it "renders the document title as both <title> and the page's single <h1>" $ do
++    let doc = either (error . show) id
++          (mkDocument (Just (either (error . show) id (mkNonEmptyText "My Title")))
++                      [Paragraph [Plain "body text"]])
++    case renderDocument "style.css" doc of
++      Left e     -> expectationFailure ("expected a render, got " <> show e)
++      Right html -> do
++        html `shouldSatisfy` Text.isInfixOf "<title>My Title</title>"
++        html `shouldSatisfy` Text.isInfixOf "<h1>My Title</h1>"
++
++  it "emits charset, viewport, lang, a skip link, and a single main landmark" $ do
++    let doc = either (error . show) id (mkDocument Nothing [Paragraph [Plain "x"]])
++    case renderDocument "style.css" doc of
++      Left e     -> expectationFailure ("expected a render, got " <> show e)
++      Right html -> do
++        html `shouldSatisfy` Text.isInfixOf "<meta charset=\"UTF-8\">"
++        html `shouldSatisfy` Text.isInfixOf "name=\"viewport\""
++        html `shouldSatisfy` Text.isInfixOf "<html lang=\"en\">"
++        html `shouldSatisfy` Text.isInfixOf "class=\"skip-link\""
++        html `shouldSatisfy` Text.isInfixOf "<main id=\"main\">"
++
++  it "emits width/height/loading on an image with known dimensions" $ do
++    let doc = either (error . show) id
++          (mkDocument Nothing [Image (imageUrl "https://ex.com/c.png") "a cat" (Just (400, 300))])
++    case renderDocument "style.css" doc of
++      Left e     -> expectationFailure ("expected a render, got " <> show e)
++      Right html -> do
++        html `shouldSatisfy` Text.isInfixOf "width=\"400\""
++        html `shouldSatisfy` Text.isInfixOf "height=\"300\""
++        html `shouldSatisfy` Text.isInfixOf "loading=\"lazy\""
++
++  it "omits width/height, but still emits loading=lazy, when dimensions are unknown" $ do
++    let doc = either (error . show) id
++          (mkDocument Nothing [Image (imageUrl "https://ex.com/c.png") "a cat" Nothing])
++    case renderDocument "style.css" doc of
++      Left e     -> expectationFailure ("expected a render, got " <> show e)
++      Right html -> do
++        html `shouldSatisfy` Text.isInfixOf "loading=\"lazy\""
++        html `shouldNotSatisfy` Text.isInfixOf "width=\""
++
++  it "renders a table header cell with scope=\"col\"" $ do
++    let doc = either (error . show) id
++          (mkDocument Nothing [tableOrError (Just [[Plain "H"]]) [[[Plain "a"]]]])
++    case renderDocument "style.css" doc of
++      Left e     -> expectationFailure ("expected a render, got " <> show e)
++      Right html -> html `shouldSatisfy` Text.isInfixOf "<th scope=\"col\">"
++
++  it "REGRESSION: fails cleanly with UnrenderableNestingDepth on adversarially deep nesting, rather than crashing" $ do
++    let doc = either (error . show) id (mkDocument Nothing [nestBlockQuote 200 (Paragraph [Plain "x"])])
++    case renderDocument "style.css" doc of
++      Left (ErrRender (UnrenderableNestingDepth _)) -> pure ()
++      other -> expectationFailure ("expected UnrenderableNestingDepth, got " <> show other)
++
++-- | Wraps a block in @n@ nested 'BlockQuote's around a single leaf --
++-- structurally recursive on a decreasing 'Int', so this is total
++-- without reaching for the banned, partial '(!!)'.
++nestBlockQuote :: Int -> Block -> Block
++nestBlockQuote 0 leaf = leaf
++nestBlockQuote n leaf = BlockQuote (nestBlockQuote (n - 1) leaf :| [])
++
+ --------------------------------------------------------------------------
+ -- Mirror.Parser.Markdown
+ --------------------------------------------------------------------------
+@@ -104,43 +175,43 @@ markdownSpec = describe "Mirror.Parser.Markdown" $ do
+   it "REGRESSION: joins a wrapped paragraph's lines with SoftBreak, not one <p> per line" $
+     parseMarkdown "This is a paragraph\nthat spans two lines."
+       `shouldBe` mkDocument Nothing
+-        [Paragraph [Text "This is a paragraph", SoftBreak, Text "that spans two lines."]]
++        [Paragraph [Plain "This is a paragraph", SoftBreak, Plain "that spans two lines."]]
+ 
+   it "keeps a blank-line-separated paragraph as its own block" $
+     parseMarkdown "First.\n\nSecond."
+-      `shouldBe` mkDocument Nothing [Paragraph [Text "First."], Paragraph [Text "Second."]]
++      `shouldBe` mkDocument Nothing [Paragraph [Plain "First."], Paragraph [Plain "Second."]]
+ 
+   it "recognises heading levels 1 and 6" $
+     parseMarkdown "# One\n\n###### Six"
+-      `shouldBe` mkDocument Nothing [Heading H1 [Text "One"], Heading H6 [Text "Six"]]
++      `shouldBe` mkDocument Nothing [Heading H1 [Plain "One"], Heading H6 [Plain "Six"]]
+ 
+   it "treats seven or more hashes as an ordinary paragraph, not a rejected document" $
+     parseMarkdown "####### not a heading"
+-      `shouldBe` mkDocument Nothing [Paragraph [Text "####### not a heading"]]
++      `shouldBe` mkDocument Nothing [Paragraph [Plain "####### not a heading"]]
+ 
+   it "collapses multiple consecutive blank lines to a single separator" $
+-    parseMarkdown "A.\n\n\n\nB." `shouldBe` mkDocument Nothing [Paragraph [Text "A."], Paragraph [Text "B."]]
++    parseMarkdown "A.\n\n\n\nB." `shouldBe` mkDocument Nothing [Paragraph [Plain "A."], Paragraph [Plain "B."]]
+ 
+   it "rejects an all-blank document" $
+     parseMarkdown "   \n\n  " `shouldBe` Left (ErrValidation EmptyDocumentBody)
+ 
+   it "a heading immediately followed by a paragraph, with no blank line, still splits into two blocks" $
+     parseMarkdown "# Title\nBody text right after"
+-      `shouldBe` mkDocument Nothing [Heading H1 [Text "Title"], Paragraph [Text "Body text right after"]]
++      `shouldBe` mkDocument Nothing [Heading H1 [Plain "Title"], Paragraph [Plain "Body text right after"]]
+ 
+   it "normalises CRLF line endings before joining or splitting" $
+     parseMarkdown "Line one\r\nLine two\r\n\r\nSecond para\r\n"
+       `shouldBe` mkDocument Nothing
+-        [ Paragraph [Text "Line one", SoftBreak, Text "Line two"]
+-        , Paragraph [Text "Second para"]
++        [ Paragraph [Plain "Line one", SoftBreak, Plain "Line two"]
++        , Paragraph [Plain "Second para"]
+         ]
+ 
+   -- Inline syntax (the Megaparsec inline layer, §6)
+   it "parses **strong** emphasis" $
+-    parseMarkdown "**bold**" `shouldBe` mkDocument Nothing [Paragraph [Strong [Text "bold"]]]
++    parseMarkdown "**bold**" `shouldBe` mkDocument Nothing [Paragraph [Strong [Plain "bold"]]]
+ 
+   it "parses *emphasis*" $
+-    parseMarkdown "*italic*" `shouldBe` mkDocument Nothing [Paragraph [Emphasis [Text "italic"]]]
++    parseMarkdown "*italic*" `shouldBe` mkDocument Nothing [Paragraph [Emphasis [Plain "italic"]]]
+ 
+   it "parses a `code span`" $
+     parseMarkdown "`x = 1`" `shouldBe` mkDocument Nothing [Paragraph [InlineCode "x = 1"]]
+@@ -148,17 +219,17 @@ markdownSpec = describe "Mirror.Parser.Markdown" $ do
+   it "parses a [text](url) link, recursing on the link text" $
+     parseMarkdown "[**A**](https://anthropic.com)"
+       `shouldBe` mkDocument Nothing
+-        [Paragraph [Link (url "https://anthropic.com") [Strong [Text "A"]]]]
++        [Paragraph [Link (url "https://anthropic.com") (Strong [Plain "A"] :| [])]]
+ 
+   it "TRAP: an inner * must not steal from an outer ** closing marker" $
+     parseMarkdown "**text*more**"
+-      `shouldBe` mkDocument Nothing [Paragraph [Strong [Text "text*more"]]]
++      `shouldBe` mkDocument Nothing [Paragraph [Strong [Plain "text*more"]]]
+ 
+   it "shields a code span's contents from emphasis interpretation" $
+     parseMarkdown "`a*b*c`" `shouldBe` mkDocument Nothing [Paragraph [InlineCode "a*b*c"]]
+ 
+   it "treats an escaped \\* as a literal asterisk, not a delimiter" $
+-    parseMarkdown "a\\*b" `shouldBe` mkDocument Nothing [Paragraph [Text "a*b"]]
++    parseMarkdown "a\\*b" `shouldBe` mkDocument Nothing [Paragraph [Plain "a*b"]]
+ 
+   it "reports InvalidUrl for a link whose URL is not a valid URI" $
+     parseMarkdown "[bad](not a url)" `shouldSatisfy` isInvalidUrl
+@@ -168,22 +239,22 @@ markdownSpec = describe "Mirror.Parser.Markdown" $ do
+     parseMarkdown "- one\n- two"
+       `shouldBe` mkDocument Nothing
+         [ BulletList Unordered
+-            ( ListItem [Paragraph [Text "one"]]
+-                :| [ListItem [Paragraph [Text "two"]]] )
++            ( ListItem [Paragraph [Plain "one"]]
++                :| [ListItem [Paragraph [Plain "two"]]] )
+         ]
+ 
+   it "recognises an ordered list from N. markers" $
+     parseMarkdown "1. first\n2. second"
+       `shouldBe` mkDocument Nothing
+         [ BulletList Ordered
+-            ( ListItem [Paragraph [Text "first"]]
+-                :| [ListItem [Paragraph [Text "second"]]] )
++            ( ListItem [Paragraph [Plain "first"]]
++                :| [ListItem [Paragraph [Plain "second"]]] )
+         ]
+ 
+   it "unwraps a > blockquote and parses its contents recursively" $
+     parseMarkdown "> quoted **bold**"
+       `shouldBe` mkDocument Nothing
+-        [BlockQuote (Paragraph [Text "quoted ", Strong [Text "bold"]] :| [])]
++        [BlockQuote (Paragraph [Plain "quoted ", Strong [Plain "bold"]] :| [])]
+ 
+   it "parses a fenced code block, preserving its body verbatim" $
+     parseMarkdown "```haskell\nf x = x\n```"
+@@ -197,8 +268,8 @@ markdownSpec = describe "Mirror.Parser.Markdown" $ do
+     parseMarkdown "| A | B |\n| - | - |\n| 1 | 2 |"
+       `shouldBe` mkDocument Nothing
+         [ tableOrError
+-            (Just [[Text "A"], [Text "B"]])
+-            [[[Text "1"], [Text "2"]]]
++            (Just [[Plain "A"], [Plain "B"]])
++            [[[Plain "1"], [Plain "2"]]]
+         ]
+ 
+   it "reports MismatchedTableColumns for a ragged pipe table -- the shared validation" $
+@@ -208,11 +279,15 @@ markdownSpec = describe "Mirror.Parser.Markdown" $ do
+   it "recognises a --- thematic break as a horizontal rule" $
+     parseMarkdown "above\n\n---\n\nbelow"
+       `shouldBe` mkDocument Nothing
+-        [Paragraph [Text "above"], HorizontalRule, Paragraph [Text "below"]]
++        [Paragraph [Plain "above"], HorizontalRule, Paragraph [Plain "below"]]
+ 
+   it "recognises a standalone image line" $
+     parseMarkdown "![a cat](https://ex.com/c.png)"
+-      `shouldBe` mkDocument Nothing [Image (url "https://ex.com/c.png") "a cat"]
++      `shouldBe` mkDocument Nothing [Image (imageUrl "https://ex.com/c.png") "a cat" Nothing]
++
++  it "REGRESSION: a long run of paired emphasis delimiters parses to completion without crashing" $
++    let manyPairs = Text.concat (replicate 2000 "*x*")
++    in parseMarkdown manyPairs `shouldSatisfy` isRight
+ 
+ --------------------------------------------------------------------------
+ -- Mirror.Parser.Docx
+@@ -223,18 +298,18 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
+   it "REGRESSION: resolves a Heading1-styled paragraph's level from w:pStyle/@w:val" $ do
+     result <- runExceptT (parseDocx "t.docx" (docxBytes
+       "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr><w:r><w:t>Title</w:t></w:r></w:p>"))
+-    result `shouldBe` mkDocument Nothing [Heading H1 [Text "Title"]]
++    result `shouldBe` mkDocument Nothing [Heading H1 [Plain "Title"]]
+ 
+   it "REGRESSION: an empty paragraph renders as an empty block, not a rejected document" $ do
+     result <- runExceptT (parseDocx "t.docx" (docxBytes
+       "<w:p><w:r><w:t>Before</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After</w:t></w:r></w:p>"))
+     result `shouldBe` mkDocument Nothing
+-      [Paragraph [Text "Before"], Paragraph [], Paragraph [Text "After"]]
++      [Paragraph [Plain "Before"], Paragraph [], Paragraph [Plain "After"]]
+ 
+   it "honours an explicit w:val=\"0\" as turning bold off despite w:b being present" $ do
+     result <- runExceptT (parseDocx "t.docx" (docxBytes
+       "<w:p><w:r><w:rPr><w:b w:val=\"0\"/></w:rPr><w:t>plain</w:t></w:r></w:p>"))
+-    result `shouldBe` mkDocument Nothing [Paragraph [Text "plain"]]
++    result `shouldBe` mkDocument Nothing [Paragraph [Plain "plain"]]
+ 
+   -- Hyperlinks (r:id resolved through document.xml.rels)
+   it "resolves a w:hyperlink through the relationships part into a Link" $ do
+@@ -242,7 +317,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
+       [("word/_rels/document.xml.rels", relsXml [("rId1", "https://anthropic.com")])]
+       "<w:p><w:hyperlink r:id=\"rId1\"><w:r><w:t>click</w:t></w:r></w:hyperlink></w:p>"))
+     result `shouldBe` mkDocument Nothing
+-      [Paragraph [Link (url "https://anthropic.com") [Text "click"]]]
++      [Paragraph [Link (url "https://anthropic.com") (Plain "click" :| [])]]
+ 
+   it "reports DocxUnresolvedRelationship for a hyperlink whose r:id is not in the rels" $ do
+     result <- runExceptT (parseDocx "t.docx" (docxRich []
+@@ -259,7 +334,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
+   it "turns a w:br inside a run into a SoftBreak" $ do
+     result <- runExceptT (parseDocx "t.docx" (docxRich []
+       "<w:p><w:r><w:t>a</w:t><w:br/><w:t>b</w:t></w:r></w:p>"))
+-    result `shouldBe` mkDocument Nothing [Paragraph [Text "a", SoftBreak, Text "b"]]
++    result `shouldBe` mkDocument Nothing [Paragraph [Plain "a", SoftBreak, Plain "b"]]
+ 
+   -- Horizontal rule (bottom paragraph border, Word's --- autoformat)
+   it "recognises a paragraph bottom border as a HorizontalRule" $ do
+@@ -273,7 +348,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
+       (  "<w:p><w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr><w:r><w:t>one</w:t></w:r></w:p>"
+       <> "<w:p><w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr><w:r><w:t>two</w:t></w:r></w:p>")))
+     result `shouldBe` mkDocument Nothing
+-      [BlockQuote (Paragraph [Text "one"] :| [Paragraph [Text "two"]])]
++      [BlockQuote (Paragraph [Plain "one"] :| [Paragraph [Plain "two"]])]
+ 
+   -- Tables (w:tbl / w:tr / w:tc), never a header row
+   it "parses a w:tbl into a header-less TableBlock" $ do
+@@ -283,7 +358,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
+       <> "<w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc>"
+       <> "</w:tr></w:tbl>")))
+     result `shouldBe` mkDocument Nothing
+-      [tableOrError Nothing [[[Text "A"], [Text "B"]]]]
++      [tableOrError Nothing [[[Plain "A"], [Plain "B"]]]]
+ 
+   it "reports MismatchedTableColumns for a ragged w:tbl -- the shared validation" $ do
+     result <- runExceptT (parseDocx "t.docx" (docxRich []
+@@ -302,8 +377,8 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
+       <> numberedPara "1" "two")))
+     result `shouldBe` mkDocument Nothing
+       [ BulletList Unordered
+-          ( ListItem [Paragraph [Text "one"]]
+-              :| [ListItem [Paragraph [Text "two"]]] )
++          ( ListItem [Paragraph [Plain "one"]]
++              :| [ListItem [Paragraph [Plain "two"]]] )
+       ]
+ 
+   it "resolves a decimal numFmt to an ordered list" $ do
+@@ -311,7 +386,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
+       [("word/numbering.xml", numberingXml "decimal")]
+       (numberedPara "1" "only")))
+     result `shouldBe` mkDocument Nothing
+-      [BulletList Ordered (ListItem [Paragraph [Text "only"]] :| [])]
++      [BulletList Ordered (ListItem [Paragraph [Plain "only"]] :| [])]
+ 
+   it "reports DocxUnresolvedNumbering when a numId has no numbering.xml entry" $ do
+     result <- runExceptT (parseDocx "t.docx" (docxRich []
+@@ -326,7 +401,7 @@ docxSpec = describe "Mirror.Parser.Docx" $ do
+       ]
+       (drawingPara "rId5" "a cat")))
+     result `shouldBe` mkDocument Nothing
+-      [Image (url "data:image/png;base64,aGVsbG8=") "a cat"]
++      [Image (imageUrl "data:image/png;base64,aGVsbG8=") "a cat" Nothing]
+ 
+   it "reports DocxUnsupportedImageFormat for an unrecognised media extension" $ do
+     result <- runExceptT (parseDocx "t.docx" (docxRich
+@@ -391,6 +466,9 @@ drawingPara embedId alt =
+ url :: Text.Text -> Url
+ url t = either (error . show) id (mkUrl t)
+ 
++imageUrl :: Text.Text -> Url
++imageUrl t = either (error . show) id (mkImageUrl t)
++
+ languageTag :: Text.Text -> LanguageTag
+ languageTag t = maybe (error ("bad language tag: " <> show t)) id (languageTagFromText t)
+ 
+@@ -406,7 +484,7 @@ jsonSpec = describe "Mirror.Parser.Json" $ do
+   it "round-trips a heading" $
+     parseJson (BSLC.pack
+       "{\"blocks\":[{\"type\":\"heading\",\"level\":2,\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}]}")
+-      `shouldBe` mkDocument Nothing [Heading H2 [Text "Hi"]]
++      `shouldBe` mkDocument Nothing [Heading H2 [Plain "Hi"]]
+ 
+   it "reports MismatchedTableColumns for a ragged table -- the same error any source gets" $
+     parseJson (BSLC.pack
+@@ -419,9 +497,9 @@ jsonSpec = describe "Mirror.Parser.Json" $ do
+   it "reports JsonSchemaViolation for an unrecognised block type" $
+     parseJson (BSLC.pack "{\"blocks\":[{\"type\":\"bogus\"}]}") `shouldSatisfy` isSchemaViolation
+ 
+-  it "reports JsonSchemaViolation for a heading level outside 1..6" $
++  it "reports InvalidHeadingLevel for a heading level outside 1..6" $
+     parseJson (BSLC.pack "{\"blocks\":[{\"type\":\"heading\",\"level\":9,\"content\":[]}]}")
+-      `shouldSatisfy` isSchemaViolation
++      `shouldSatisfy` isInvalidHeadingLevel
+ 
+   it "reports JsonSyntax for input that isn't well-formed JSON at all" $
+     parseJson (BSLC.pack "{not json") `shouldSatisfy` isJsonSyntaxError
+@@ -453,10 +531,31 @@ jsonSpec = describe "Mirror.Parser.Json" $ do
+       "{\"blocks\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"link\",\"href\":\"not a url\",\"content\":[]}]}]}")
+       `shouldSatisfy` isInvalidUrl
+ 
++  it "REGRESSION: rejects a document nested far past the depth ceiling with ExcessiveNestingDepth, rather than exhausting the stack" $
++    parseJson (BSLC.pack (Text.unpack ("{\"blocks\":[" <> nestedBlockquoteJson 200 <> "]}")))
++      `shouldSatisfy` isExcessiveNestingDepth
++
++-- | A JSON blockquote nested @n@ levels deep around a single empty
++-- paragraph -- built here, deterministically, by direct string
++-- construction (not by relying on any parser's own backtracking
++-- behaviour), so this test's depth is exactly known rather than
++-- inferred from delimiter-matching semantics.
++nestedBlockquoteJson :: Int -> Text.Text
++nestedBlockquoteJson 0 = "{\"type\":\"paragraph\",\"content\":[]}"
++nestedBlockquoteJson n = "{\"type\":\"blockquote\",\"content\":[" <> nestedBlockquoteJson (n - 1) <> "]}"
++
++isExcessiveNestingDepth :: Either MirrorError a -> Bool
++isExcessiveNestingDepth (Left (ErrParse (ExcessiveNestingDepth _))) = True
++isExcessiveNestingDepth _                                           = False
++
+ isInvalidLanguageTag :: Either MirrorError a -> Bool
+ isInvalidLanguageTag (Left (ErrValidation (InvalidLanguageTag _))) = True
+ isInvalidLanguageTag _                                            = False
+ 
++isInvalidHeadingLevel :: Either MirrorError a -> Bool
++isInvalidHeadingLevel (Left (ErrValidation (InvalidHeadingLevel _))) = True
++isInvalidHeadingLevel _                                              = False
++
+ isSchemaViolation :: Either MirrorError a -> Bool
+ isSchemaViolation (Left (ErrParse (JsonSchemaViolation _))) = True
+ isSchemaViolation _                                         = False
