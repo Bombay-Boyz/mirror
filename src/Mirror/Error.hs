@@ -138,11 +138,15 @@ data ValidationError
     -- 'Mirror.Document.Raw.toBlock', so this is never tagged as a
     -- JSON-, Markdown-, or DOCX-specific failure even though only
     -- JSON's free-form @"level"@ field can produce it today.
-  | EmptyLinkText
-    -- ^ A hyperlink whose visible text is empty. Unlike a paragraph or
-    -- a table cell, an anchor with no content is not "ordinary,
-    -- possibly-empty data" — it is both inaccessible (no accessible
-    -- name for assistive technology) and unusable (nothing to click).
+  | EmptyLinkText Text
+    -- ^ A hyperlink whose visible text is empty, and the @href@ it
+    -- pointed to (so this is namable in a real document, not just a
+    -- bare complaint — a converter that hard-fails a 40-page document
+    -- over one bad link owes the reader /which/ link, per §2.15).
+    -- Unlike a paragraph or a table cell, an anchor with no content is
+    -- not "ordinary, possibly-empty data" — it is both inaccessible
+    -- (no accessible name for assistive technology) and unusable
+    -- (nothing to click).
   deriving (Eq, Show)
 
 -- | Failures possible while turning a validated 'Mirror.Document.Document'
@@ -224,7 +228,7 @@ renderValidationError = \case
   DisallowedUrlScheme s  -> "URL scheme \"" <> s <> "\" is not permitted in this context"
   InvalidLanguageTag t   -> "not a recognised code-block language: " <> t
   InvalidHeadingLevel n  -> "heading level must be an integer from 1 to 6, got " <> tshow n
-  EmptyLinkText          -> "a link must have non-empty visible text"
+  EmptyLinkText href      -> "a link to \"" <> href <> "\" has no visible text"
 
 renderRenderError :: RenderError -> Text
 renderRenderError = \case

@@ -574,6 +574,11 @@ jsonSpec = describe "Mirror.Parser.Json" $ do
       "{\"blocks\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"link\",\"href\":\"not a url\",\"content\":[]}]}]}")
       `shouldSatisfy` isInvalidUrl
 
+  it "REGRESSION: rejects a link with empty visible text, and names the offending href in the error" $
+    parseJson (BSLC.pack
+      "{\"blocks\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"link\",\"href\":\"https://ex.com/toc\",\"content\":[]}]}]}")
+      `shouldBe` Left (ErrValidation (EmptyLinkText "https://ex.com/toc"))
+
   it "REGRESSION: rejects a document nested far past the depth ceiling with ExcessiveNestingDepth, rather than exhausting the stack" $
     parseJson (BSLC.pack (Text.unpack ("{\"blocks\":[" <> nestedBlockquoteJson 200 <> "]}")))
       `shouldSatisfy` isExcessiveNestingDepth

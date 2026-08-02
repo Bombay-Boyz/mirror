@@ -132,7 +132,7 @@ toInline depth raw = do
     RawLink href xs -> do
       url       <- mkUrl href
       inlines   <- traverse (toInline (depth + 1)) xs
-      inlinesNE <- note (ErrValidation EmptyLinkText) (nonEmpty inlines)
+      inlinesNE <- note (ErrValidation (EmptyLinkText href)) (nonEmpty inlines)
       pure (Link url inlinesNE)
     RawInlineCode t -> pure (InlineCode t)
     RawSoftBreak    -> pure SoftBreak
